@@ -1,0 +1,22 @@
+# Deny runtime data by default. Explicitly allow only reviewed public source.
+*
+!.gitignore
+!README.md
+!LICENSE
+!AGENTS.md
+!google-photos-cli.py
+!google-photos-cli.py.lock
+!photos_api.py
+!api-bridge.py
+!api-bridge.js
+!converter.py
+!migration.py
+!video_codec.py
+!video_migration.py
+!selection.py
+!audit_library.py
+!tests/
+!tests/test_*.py
+!.github/
+!.github/workflows/
+!.github/workflows/tests.yml
