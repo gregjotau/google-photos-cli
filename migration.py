@@ -29,7 +29,7 @@ def attrs(row):
 
 
 def is_video(row):
-    return "76647426" in attrs(row)
+    return "76647426" in attrs(row) and "146008172" not in attrs(row)
 
 
 class Migration:
@@ -96,7 +96,14 @@ class Migration:
         state = self.state(key)
         if state.get("account") != self.account:
             raise RuntimeError("Journal account mismatch")
-        if "146008172" in attrs(row):
+        if state.get("stage") in ("trashed", "already_avif", "video"):
+            return
+        live = "146008172" in attrs(row)
+        if live and self.selection.live_photos == "keep":
+            if state.get("replacement_key"):
+                raise RuntimeError(
+                    "Pending Live Photo still replacement exists; finish it before changing policy to keep"
+                )
             self.write(
                 state,
                 stage="live_photo_unchanged",
@@ -104,8 +111,6 @@ class Migration:
                 error=None,
                 reason="Keep combined Live Photos unchanged",
             )
-            return
-        if state.get("stage") in ("trashed", "already_avif", "video"):
             return
         if is_video(row):
             self.write(state, stage="video")
@@ -122,10 +127,14 @@ class Migration:
         if state.get("replacement_key"):
             self.queue(state)
             return
+        if not state.get("deletion_mode"):
+            self.write(state, deletion_mode=self.selection.delete_mode)
         folder = WORK / key
         folder.mkdir(exist_ok=True)
         source = folder / ("original" + Path(filename).suffix.lower())
-        output = folder / (Path(filename).stem + "-avif.avif")
+        output = folder / (
+            Path(filename).stem + ("-still-avif.avif" if live else "-avif.avif")
+        )
         if not state.get("original_info"):
             info = self.api.info(key)
             if at(info, 0, 0) != key:
@@ -144,6 +153,17 @@ class Migration:
                 inventory_row=row,
             )
         info = state["original_info"]
+        if live:
+            self.write(
+                state,
+                source=str(source),
+                output=str(output),
+                live_photo_policy="still",
+                inventory_row=row,
+                error=None,
+                reason="Convert combined Live Photo to one AVIF still; retain all original components locally",
+            )
+            self.backup_live(state, source)
         if (
             source.exists()
             and state.get("original_backup_bytes", er[5])
@@ -214,6 +234,7 @@ class Migration:
                 self.threads,
                 (er[3], er[4] or 0),
                 self.gps(ext),
+                live,
             )
             if pool is None:
                 fut = concurrent.futures.Future()
@@ -221,6 +242,75 @@ class Migration:
             else:
                 fut = pool.submit(convert, *args)
         return state, fut
+
+    def backup_live(self, state, source):
+        """Back up every original component before discarding cloud motion."""
+        if state.get("live_backup_manifest"):
+            self.verify_live_backup(state)
+            return
+        files = originals(self.api, [state["original_key"]])
+        files = [(n, b) for n, b in files if Path(n).suffix.lower() != ".json"]
+        movie_suffixes = {".mov", ".mp4", ".m4v"}
+        stills = [
+            (n, b) for n, b in files if Path(n).suffix.lower() not in movie_suffixes
+        ]
+        if len(stills) != 1:
+            raise RuntimeError(
+                "Live Photo export must contain exactly one primary image"
+            )
+        if sum(len(b) for _, b in files) != state["original_bytes"]:
+            raise RuntimeError(
+                "Live Photo component sizes do not match the recorded combined original"
+            )
+        manifest = []
+        for i, (name, data) in enumerate(files):
+            movie = Path(name).suffix.lower() in movie_suffixes
+            target = (
+                source.parent
+                / ("original-motion-" + str(i) + Path(name).suffix.lower())
+                if movie
+                else source
+            )
+            tmp = target.with_suffix(target.suffix + ".part")
+            tmp.write_bytes(data)
+            tmp.replace(target)
+            manifest.append(
+                {
+                    "path": str(target),
+                    "sha256": sha(data),
+                    "bytes": len(data),
+                    "role": "motion" if movie else "still",
+                }
+            )
+        image = next(item for item in manifest if item["role"] == "still")
+        self.write(
+            state,
+            live_backup_manifest=manifest,
+            original_sha256=image["sha256"],
+            original_backup_bytes=image["bytes"],
+            original_export_verified=True,
+            stage="downloaded",
+        )
+
+    def verify_live_backup(self, state):
+        manifest = state.get("live_backup_manifest")
+        if (
+            not manifest
+            or sum(item["bytes"] for item in manifest) != state["original_bytes"]
+        ):
+            raise RuntimeError(
+                "Complete Live Photo original backup is required before cloud replacement"
+            )
+        for item in manifest:
+            path = Path(item["path"])
+            if (
+                not path.is_file()
+                or path.stat().st_size != item["bytes"]
+                or digest(path) != item["sha256"]
+            ):
+                raise RuntimeError(
+                    "Live Photo original component backup changed; retain the cloud original"
+                )
 
     def commit(self, state, future):
         result = future.result()
@@ -253,9 +343,11 @@ class Migration:
         )
 
     def finalize(self, state, defer_trash=False, cloud_values=None):
-        if "146008172" in attrs(state.get("inventory_row", [])):
-            self.write(state, stage="live_photo_unchanged")
-            return True
+        live = "146008172" in attrs(state.get("inventory_row", []))
+        if live and state.get("live_photo_policy") != "still":
+            raise RuntimeError(
+                "Live Photo replacement requires explicit still policy in its journal"
+            )
         key = state["replacement_key"]
         old = state["original_key"]
         ext = state["original_ext"]
@@ -273,6 +365,10 @@ class Migration:
         info, newext = values
         if not info or not newext:
             return False
+        if live and "146008172" in attrs(info[0]):
+            raise RuntimeError(
+                "Replacement is still a Live Photo; retain the combined original"
+            )
         ne = newext[0]
         if not ne[2].lower().endswith(".avif") or ne[5] != state["avif_bytes"]:
             return False
@@ -326,12 +422,8 @@ class Migration:
             digest(state["source"]) != state["original_sha256"]
         ):
             raise RuntimeError("Original backup size mismatch; retain original")
-        # Motion-photo originals carry a video component: preserve it separately first.
-        motion = at(attrs(state["original_info"][0]), "146008172", 1)
-        if motion is not None and not state.get("motion_video_verified"):
-            raise RuntimeError(
-                "Motion photo needs companion-video preservation before trash"
-            )
+        if live:
+            self.verify_live_backup(state)
         self.write(
             state,
             stage="trashing",

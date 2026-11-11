@@ -4,20 +4,20 @@
 
 This is a Python 3.15+ Google Photos optimizer with inline PEP 723 dependencies in `google-photos-cli.py`. Use `uv run --locked google-photos-cli.py …`; do not add a requirements file or a parallel dependency declaration. Native tools are libavif with AOM, ExifTool, FFmpeg with x265/AAC, and Chrome. Keep the support credit to ReAI at the top of README.md.
 
-Cloud writes are opt-in through `--apply`; preview is the default. Respect a user's account, filters, and scope. Never empty Trash or permanently delete cloud items. Do not publish user media, account identifiers, credentials, Google signed URLs, browser profiles, inventories, catalogs, logs, or migration journals. The Git ignore file is a source allowlist: review every new allowlist entry and the complete staged content before pushing.
+Cloud writes are opt-in through `--apply`; preview is the default. Respect a user's account, filters, and scope. Never empty account-wide Trash or delete unrelated items. Permanent removal is allowed only for explicit permanent-mode sources, after complete verified local backups and replacement checks, with --confirm-permanent-delete and any action-time confirmation required by the client. Never upgrade legacy or Trash-mode completed journals to permanent deletion. Do not publish user media, account identifiers, credentials, Google signed URLs, browser profiles, inventories, catalogs, logs, or migration journals. The Git ignore file is a source allowlist: review every new allowlist entry and the complete staged content before pushing.
 
 ## Safety invariants
 
 - Bind inventory, metadata, and journals to the connected account; reject mismatches.
 - Keep downloaded originals locally. Commit output files and journals atomically.
 - Record intent before remote commit and reconcile interruptions by content hash. Never blindly repeat an ambiguous upload commit.
-- Preserve combined Live/Motion Photos unchanged; never split one cloud asset into two. Exclude Locked Folder.
+- Default Live/Motion Photos to one AVIF still, backing up ALL original still/motion components locally before removal. --live-photos keep preserves the combined cloud original; never create two cloud assets from one. Exclude Locked Folder.
 - Require the replacement's expected filename, stored size, cloud capture timestamp/timezone, and byte-identical SHA-256 true-original export before trashing its source.
 - Use `pLFTfd` original export. Other download endpoints can return compatibility JPEGs/transcoded video, including for canonical AVIF/MP4 uploads. Processing delays must cause a wait, not a weakened check.
 - Preserve reported writable album memberships and descriptions; retain favorites/archive flags. Never alter album access lists.
 - Videos must fully decode locally, retain duration/audio presence, expose cloud playback variants, and be smaller before source removal.
-- Require Google's Original-quality flag before removing a video source. Storage saver can asynchronously replace an initially byte-identical HEVC upload with VP9 and different bytes/size. See `docs/STORAGE_SAVER.md`. Do not automatically change account settings. `videos --repair --apply` remuxes retained encoded streams, verifies the new Original-quality upload, removes the superseded candidate, and updates the original authoritative journal without changing its baseline size.
-- Read back Trash after moving originals. A successful HTTP response is insufficient.
+- Require Google's Original-quality flag before removing a video source. Storage saver can asynchronously replace an initially byte-identical HEVC upload with VP9 and different bytes/size. See `docs/STORAGE_SAVER.md`. Do not automatically change account settings without user authorization; record and restore the previous preference when a user authorizes a temporary change. `videos --repair --apply` remuxes retained encoded streams, verifies the new Original-quality upload, removes the superseded candidate, and updates the original authoritative journal without changing its baseline size.
+- Read back Trash after moving originals; permanent removal must match authoritative Trash media IDs and deletion keys against original metadata, then confirm absence. A successful HTTP response is insufficient.
 - Fresh audits must reconcile every expected original/replacement and distinguish a filtered selection from the whole library. Never claim complete library migration based on a sample or cached inventory alone.
 
 ## Architecture and performance

@@ -35,8 +35,14 @@ class Selection:
     exclude_favorites: bool = False
     exclude_archived: bool = False
     limit: int | None = None
+    live_photos: str = "still"
+    delete_mode: str = "permanent"
 
     def __post_init__(self):
+        if self.live_photos not in ("still", "keep"):
+            raise ValueError("Live Photo policy must be still or keep")
+        if self.delete_mode not in ("permanent", "trash"):
+            raise ValueError("Deletion mode must be permanent or trash")
         if self.from_date and self.to_date and self.from_date > self.to_date:
             raise ValueError("--from-date must be on or before --to-date")
         if self.min_bytes < 0:
@@ -66,7 +72,7 @@ class Selection:
                 "Missing catalog metadata; run catalog before selecting media"
             )
         a = attrs(row)
-        video = "76647426" in a
+        video = "76647426" in a and "146008172" not in a
         if self.media == "images" and video or self.media == "videos" and not video:
             return False
         if self.years or self.from_date or self.to_date:
@@ -117,4 +123,6 @@ def from_args(args):
         exclude_favorites=args.exclude_favorites,
         exclude_archived=args.exclude_archived,
         limit=args.limit,
+        live_photos=args.live_photos,
+        delete_mode=args.delete_mode,
     )

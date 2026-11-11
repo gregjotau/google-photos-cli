@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from photos_api import API, ROOT, at, originals
 from migration import attrs, is_video, save, album_ids
+from selection import Selection
 
 
 def audit(root=ROOT, verbose=True, selection=None):
+    selection = selection or Selection()
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -59,6 +61,8 @@ def audit(root=ROOT, verbose=True, selection=None):
             videos.append(entry)
         elif "146008172" in attrs(row):
             live.append(entry)
+            if selection.live_photos != "keep":
+                bad.append({**entry, "reason": "Live Photo still conversion pending"})
         elif (entry["filename"] or "").lower().endswith(".avif"):
             avif.append(entry)
         else:
@@ -118,6 +122,13 @@ def audit(root=ROOT, verbose=True, selection=None):
 
     for s in states:
         stage = s.get("stage")
+        if stage == "live_photo_unchanged" and selection.live_photos != "keep":
+            problems.append(
+                {
+                    "key": s["original_key"],
+                    "problem": "Live Photo was kept but still policy requires conversion",
+                }
+            )
         if stage == "trashed":
             metadata_check(s, "avif_bytes")
             if s["original_key"] in active:
@@ -201,6 +212,10 @@ def audit(root=ROOT, verbose=True, selection=None):
                     for _, b in fs
                 ):
                     bad.append(e)
+    from removal import pending
+
+    pending_removal = pending(root, selection)
+    media_complete = inv["complete"] and not bad and not problems
     result = {
         "account": inv["account"],
         "scope": "filtered_selection" if scoped else "whole_library_and_archive",
@@ -217,7 +232,10 @@ def audit(root=ROOT, verbose=True, selection=None):
         "images": avif,
         "retained_live_photos": live,
         "video_items": videos,
-        "complete": inv["complete"] and not bad and not problems,
+        "media_complete": media_complete,
+        "pending_permanent_deletions": pending_removal,
+        "deletion_complete": not pending_removal,
+        "complete": media_complete and not pending_removal,
     }
     save(root / "audit-result.json", result)
     if verbose:

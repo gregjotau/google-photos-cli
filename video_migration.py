@@ -58,6 +58,8 @@ class Videos:
             with self.lock:
                 self.waiting.append(s)
             return
+        if not s.get("deletion_mode"):
+            self.write(s, deletion_mode=self.selection.delete_mode)
         e = self.cat["items"][key]
         er = e[0]
         source = f / ("original" + Path(er[2]).suffix.lower())

@@ -108,16 +108,37 @@ class API:
     def trash(self, keys):
         return self.rpc("XwAOJf", [None, 1, keys, 3])
 
+    def purge(self, keys, *, confirmed=False):
+        """Targeted permanent removal; never an account-wide Trash operation.
+
+        Web UI trace: XwAOJf [null,2,[dedup keys],2]. Require a deliberate
+        confirmation and a bounded explicit key list for every request.
+        """
+        if confirmed is not True:
+            raise ValueError("Permanent deletion requires explicit confirmation")
+        if (
+            not keys
+            or len(keys) > 50
+            or len(set(keys)) != len(keys)
+            or not all(isinstance(k, str) and k for k in keys)
+        ):
+            raise ValueError("Permanent deletion requires 1..50 unique explicit keys")
+        return self.rpc("XwAOJf", [None, 2, list(keys), 2])
+
     def in_trash(self, media_keys, exhaustive=False):
         """Readback by media ID, paginating when reconciling an interrupted job."""
+        return set(self.trash_items(media_keys, exhaustive=exhaustive))
+
+    def trash_items(self, media_keys, exhaustive=False):
+        """Return authoritative Trash rows, including their deletion keys."""
         wanted = set(media_keys)
-        found = set()
+        found = {}
         cursor = None
         seen = set()
-        while wanted - found:
+        while wanted - found.keys():
             page = self.rpc("zy0IHe", [cursor])
             found.update(
-                r[0] for r in (at(page, 0, default=[]) or []) if r[0] in wanted
+                {r[0]: r for r in (at(page, 0, default=[]) or []) if r[0] in wanted}
             )
             cursor = at(page, 1)
             if not exhaustive or not cursor:

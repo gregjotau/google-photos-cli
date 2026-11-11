@@ -23,6 +23,18 @@ CODE = Path(__file__).resolve().parent
 
 def filters(p):
     p.add_argument(
+        "--delete-mode",
+        choices=["permanent", "trash"],
+        default="permanent",
+        help="Default permanent removal after verified local backup; trash keeps Google recovery",
+    )
+    p.add_argument(
+        "--live-photos",
+        choices=["still", "keep"],
+        default="still",
+        help="Default: convert Live/Motion Photos to one AVIF still; keep preserves cloud motion",
+    )
+    p.add_argument(
         "--year",
         type=year_value,
         action="append",
@@ -114,22 +126,31 @@ def parser():
     )
     combined = sub.add_parser(
         "run",
-        help="Run resumable image and video migration; keep Live Photos unchanged",
+        help="Run resumable image and video migration; Live Photos become AVIF stills by default",
     )
     encoding_options(combined)
     plan = sub.add_parser(
         "plan", help="Preview matching assets and sizes without uploading or trashing"
     )
-    for command in (mig, vid, combined, plan):
+    purge = sub.add_parser(
+        "purge-originals",
+        help="Preview or confirm targeted removal of verified permanent-mode originals",
+    )
+    for command in (mig, vid, combined, plan, purge):
         filters(command)
-    for command in (mig, vid, combined):
+    for command in (mig, vid, combined, purge):
         command.add_argument(
             "--apply",
             action="store_true",
-            help="Upload verified replacements and move originals to recoverable Trash",
+            help="Upload/verify replacements and apply the selected original-removal policy",
         )
         command.add_argument(
             "--dry-run", action="store_true", help="Preview only; overrides --apply"
+        )
+        command.add_argument(
+            "--confirm-permanent-delete",
+            action="store_true",
+            help="Explicitly authorize permanent removal of only backed-up, verified originals in this selection",
         )
     sub.add_parser("status", help="Show journal counts and measured file savings")
     sub.add_parser(
@@ -158,7 +179,11 @@ def preview(root, selection, inventory, catalog):
     for row in rows:
         e = catalog["items"][row[0]][0]
         kind = (
-            "live_photos_kept"
+            (
+                "live_photos_to_stills"
+                if selection.live_photos == "still"
+                else "live_photos_kept"
+            )
             if "146008172" in attrs(row)
             else "videos"
             if is_video(row)
@@ -171,7 +196,7 @@ def preview(root, selection, inventory, catalog):
         folder = "work-video" if is_video(row) else "work-api"
         path = root / folder / row[0] / "state.json"
         stage = json.loads(path.read_text()).get("stage") if path.exists() else None
-        if kind in ("images", "videos") and stage not in (
+        if kind in ("images", "videos", "live_photos_to_stills") and stage not in (
             "trashed",
             "already_efficient",
         ):
@@ -183,8 +208,35 @@ def preview(root, selection, inventory, catalog):
         "pending": dict(pending),
         "locked_folder_excluded": True,
         "cloud_changes": False,
-        "note": "Estimates use recorded source sizes, not predicted encoding savings. Live Photos are kept unchanged.",
+        "live_photo_policy": selection.live_photos,
+        "source_delete_mode": selection.delete_mode,
+        "permanent_deletion_requires_confirmation": selection.delete_mode
+        == "permanent",
+        "note": "Estimates use source sizes, not predicted savings. Live Photo still conversion removes cloud motion; original components remain locally backed up.",
     }
+
+
+def complete_workflow(root, selection, args):
+    from audit_library import audit
+    from removal import create_plan, execute, summary, downgrade_to_trash
+
+    if selection.delete_mode == "trash":
+        downgrade_to_trash(root, selection)
+    result = audit(root, selection=selection)
+    if not result["media_complete"]:
+        raise SystemExit(2)
+    plan = create_plan(root, selection)
+    if plan["items"]:
+        print(json.dumps(summary(plan), indent=2))
+        if not args.confirm_permanent_delete:
+            print(
+                "Conversion verified; originals remain in Trash. Review permanent-delete-plan.json, then run purge-originals with the same filters, --apply and --confirm-permanent-delete. Use --delete-mode trash to keep recovery."
+            )
+            raise SystemExit(2)
+        execute(root, selection, confirmed=True)
+        result = audit(root, selection=selection)
+    if not result["complete"]:
+        raise SystemExit(2)
 
 
 def scan(root, api, destination="inventory-api.json"):
@@ -255,6 +307,13 @@ def status(root):
         json.loads(p.read_text()) for p in (root / "work-video").glob("*/state.json")
     ]
     return {
+        "permanently_deleted_originals": sum(
+            bool(s.get("original_deleted_permanently")) for s in states + video_states
+        ),
+        "completed_sources_in_recoverable_trash": sum(
+            s.get("stage") == "trashed" and not s.get("original_deleted_permanently")
+            for s in states + video_states
+        ),
         "videos": dict(collections.Counter(s.get("stage") for s in video_states)),
         "states": dict(collections.Counter(s.get("stage") for s in states)),
         "original_bytes_replaced": sum(s.get("original_bytes", 0) for s in done),
@@ -288,6 +347,12 @@ def savings_report(root):
         after = sum(s[size_field] for s in done)
         result[name] = {
             "replaced": len(done),
+            "permanently_deleted_originals": sum(
+                bool(s.get("original_deleted_permanently")) for s in done
+            ),
+            "sources_in_recoverable_trash": sum(
+                not s.get("original_deleted_permanently") for s in done
+            ),
             "before_bytes": before,
             "after_bytes": after,
             "saved_bytes": before - after,
@@ -367,7 +432,7 @@ def main():
     root = args.data_dir.resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     selection = None
-    if args.command in ("run", "migrate", "videos", "plan", "audit"):
+    if args.command in ("run", "migrate", "videos", "plan", "audit", "purge-originals"):
         try:
             selection = from_args(args)
         except ValueError as e:
@@ -380,7 +445,11 @@ def main():
     os.environ["GOOGLE_PHOTOS_DATA_DIR"] = str(root)
     # One modifying workflow per account directory, including combined runs.
     lock = None
-    if args.command in ("run", "migrate", "videos") and args.apply and not args.dry_run:
+    if (
+        args.command in ("run", "migrate", "videos", "purge-originals")
+        and args.apply
+        and not args.dry_run
+    ):
         import fcntl
 
         lock = (root / ".migration.lock").open("a")
@@ -406,7 +475,7 @@ def main():
             print(json.dumps(preview(root, selection, inv, cat), indent=2))
             if args.command != "plan":
                 print(
-                    "Preview only. Add --apply to upload replacements and move verified originals to Trash."
+                    "Preview only. Add --apply to convert. Permanent source removal additionally requires --confirm-permanent-delete; --delete-mode trash keeps recovery."
                 )
             return
     if args.command == "broker":
@@ -459,6 +528,25 @@ def main():
         print(json.dumps(status(root), indent=2))
     elif args.command == "report":
         print(json.dumps(savings_report(root), indent=2))
+    elif args.command == "purge-originals":
+        from removal import create_plan, execute, summary, downgrade_to_trash
+
+        if args.apply and not args.dry_run and selection.delete_mode == "trash":
+            downgrade_to_trash(root, selection)
+        plan = create_plan(root, selection)
+        print(json.dumps(summary(plan), indent=2))
+        if not args.apply or args.dry_run or not plan["items"]:
+            return
+        if not args.confirm_permanent_delete:
+            print(
+                "Review permanent-delete-plan.json and add --confirm-permanent-delete to authorize irreversible removal"
+            )
+            raise SystemExit(2)
+        execute(root, selection, confirmed=True)
+        from audit_library import audit
+
+        if not audit(root, selection=selection)["complete"]:
+            raise SystemExit(2)
     elif args.command == "videos":
         from video_migration import Videos
 
@@ -471,6 +559,7 @@ def main():
         errors, waiting = worker.run()
         if errors or waiting:
             raise SystemExit(2)
+        complete_workflow(root, selection, args)
     elif args.command == "run":
         import concurrent.futures
         from video_migration import Videos
@@ -494,10 +583,7 @@ def main():
             video_job.result()
         images()
         videos()
-        from audit_library import audit
-
-        if not audit(root, selection=selection)["complete"]:
-            raise SystemExit(2)
+        complete_workflow(root, selection, args)
     elif args.command == "scan":
         scan(root, API())
     elif args.command == "catalog":
@@ -509,6 +595,7 @@ def main():
         print(json.dumps(status(root), indent=2))
         if errors or waiting:
             raise SystemExit(2)
+        complete_workflow(root, selection, args)
     elif args.command == "audit":
         from audit_library import audit
 

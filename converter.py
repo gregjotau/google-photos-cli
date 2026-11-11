@@ -52,7 +52,14 @@ def atomic_json(path, value):
 
 
 def convert(
-    source, output, quality=45, speed=6, threads=4, capture_time=None, gps=None
+    source,
+    output,
+    quality=45,
+    speed=6,
+    threads=4,
+    capture_time=None,
+    gps=None,
+    live_still=False,
 ):
     from PIL import Image, ImageOps
 
@@ -118,6 +125,15 @@ def convert(
                 f"-ExifImageHeight={expected_size[1]}",
                 pending,
             )
+            if live_still:
+                run(
+                    "exiftool",
+                    "-overwrite_original",
+                    "-XMP-GCamera:All=",
+                    "-XMP-Container:All=",
+                    "-XMP-dc:Type=StillImage",
+                    pending,
+                )
             if capture_time is not None:
                 from datetime import datetime, timezone, timedelta
 
