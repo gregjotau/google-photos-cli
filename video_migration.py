@@ -118,6 +118,22 @@ class Videos:
         )
 
     def finalize(self, s):
+        reconcile = s.get("stage") == "trashing"
+        if (
+            reconcile
+            and s.get("encoded_sha256")
+            and s.get("download_verified_sha256") == s["encoded_sha256"]
+            and s.get("playback_ready")
+            and s.get("capture_date_verified")
+            and s.get("albums_preserved")
+            and s["original_key"]
+            in self.api.in_trash([s["original_key"]], exhaustive=True)
+        ):
+            if sha(s["source"]) != s["original_sha256"]:
+                raise RuntimeError("Video original backup changed")
+            self.write(s, stage="trashed", trashed_at=time.time())
+            self.log("removal_reconciled", key=s["original_key"])
+            return True
         key = s["replacement_key"]
         er = s["original_ext"][0]
         info, ext = self.api.batch(
@@ -176,13 +192,13 @@ class Videos:
             albums_preserved=True,
         )
         # Reconcile a previous interrupted trash rather than relying on a successful HTTP status.
-        trash = self.api.rpc("zy0IHe", [None])
-        present = {r[0] for r in at(trash, 0, default=[]) or []}
+        present = self.api.in_trash([s["original_key"]], exhaustive=reconcile)
         if s["original_key"] not in present:
             self.api.trash([s["original_info"][0][3]])
-        trash = self.api.rpc("zy0IHe", [None])
-        if s["original_key"] not in {r[0] for r in at(trash, 0, default=[]) or []}:
-            raise RuntimeError("Video Trash readback failed")
+            if s["original_key"] not in self.api.in_trash(
+                [s["original_key"]], exhaustive=True
+            ):
+                raise RuntimeError("Video Trash readback failed")
         self.write(s, stage="trashed", trashed_at=time.time())
         self.log(
             "replaced",

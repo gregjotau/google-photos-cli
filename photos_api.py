@@ -108,6 +108,25 @@ class API:
     def trash(self, keys):
         return self.rpc("XwAOJf", [None, 1, keys, 3])
 
+    def in_trash(self, media_keys, exhaustive=False):
+        """Readback by media ID, paginating when reconciling an interrupted job."""
+        wanted = set(media_keys)
+        found = set()
+        cursor = None
+        seen = set()
+        while wanted - found:
+            page = self.rpc("zy0IHe", [cursor])
+            found.update(
+                r[0] for r in (at(page, 0, default=[]) or []) if r[0] in wanted
+            )
+            cursor = at(page, 1)
+            if not exhaustive or not cursor:
+                break
+            if cursor in seen:
+                raise RuntimeError("Trash pagination loop; cannot reconcile removal")
+            seen.add(cursor)
+        return found
+
 
 if __name__ == "__main__":
     a = API()

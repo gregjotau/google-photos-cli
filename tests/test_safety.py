@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from migration import Migration
-from photos_api import upload
+from photos_api import API, upload
 
 
 class FakeAPI:
@@ -97,6 +97,53 @@ class CommitRecovery(unittest.TestCase):
             )
         self.assertEqual(result, "AF1new")
         self.assertEqual(events, ["intent", "commit"])
+
+
+class TrashRecovery(unittest.TestCase):
+    def test_interrupted_removal_can_be_found_beyond_recent_page(self):
+        api = API.__new__(API)
+        calls = []
+
+        def rpc(name, data):
+            self.assertEqual(name, "zy0IHe")
+            calls.append(data[0])
+            return (
+                [[["unrelated"]], "next-page"]
+                if data[0] is None
+                else [[["original"]], None]
+            )
+
+        api.rpc = rpc
+        self.assertEqual(api.in_trash(["original"], exhaustive=True), {"original"})
+        self.assertEqual(calls, [None, "next-page"])
+        calls.clear()
+        self.assertEqual(api.in_trash(["original"]), set())
+        self.assertEqual(calls, [None])
+
+    def test_verified_video_removal_reconciles_without_another_cloud_write(self):
+        from video_migration import Videos, sha
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.mp4"
+            source.write_bytes(b"synthetic backup")
+            s = {
+                "stage": "trashing",
+                "original_key": "old",
+                "encoded_sha256": "proof",
+                "download_verified_sha256": "proof",
+                "playback_ready": True,
+                "capture_date_verified": True,
+                "albums_preserved": True,
+                "source": str(source),
+                "original_sha256": sha(source),
+            }
+            videos = Videos.__new__(Videos)
+            videos.api = SimpleNamespace(in_trash=lambda keys, exhaustive: {"old"})
+            videos.write = lambda state, **kw: state.update(kw)
+            videos.log = lambda *a, **kw: None
+            self.assertTrue(videos.finalize(s))
+            self.assertEqual(s["stage"], "trashed")
 
 
 if __name__ == "__main__":

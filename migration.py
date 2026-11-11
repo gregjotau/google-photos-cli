@@ -261,8 +261,7 @@ class Migration:
         ext = state["original_ext"]
         er = ext[0]
         if state.get("stage") == "trashing":
-            trash = self.api.rpc("zy0IHe", [None])
-            if old in {r[0] for r in at(trash, 0, default=[]) or []}:
+            if old in self.api.in_trash([old], exhaustive=True):
                 self.write(state, stage="trashed", trashed_at=time.time())
                 return True
         values = cloud_values or self.api.batch(
