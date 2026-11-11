@@ -107,6 +107,11 @@ def parser():
     )
     encoding_options(mig)
     vid = sub.add_parser("videos", help="Optimize account videos as HEVC/AAC MP4")
+    vid.add_argument(
+        "--repair",
+        action="store_true",
+        help="Re-upload previously rewritten video replacements after selecting Original quality",
+    )
     combined = sub.add_parser(
         "run",
         help="Run resumable image and video migration; keep Live Photos unchanged",
@@ -457,7 +462,13 @@ def main():
     elif args.command == "videos":
         from video_migration import Videos
 
-        errors, waiting = Videos(selection=selection).run()
+        if args.repair:
+            from video_repair import VideoRepair
+
+            worker = VideoRepair(selection=selection)
+        else:
+            worker = Videos(selection=selection)
+        errors, waiting = worker.run()
         if errors or waiting:
             raise SystemExit(2)
     elif args.command == "run":

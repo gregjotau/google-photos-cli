@@ -13,8 +13,11 @@
 !migration.py
 !video_codec.py
 !video_migration.py
+!video_repair.py
 !selection.py
 !audit_library.py
+!docs/
+!docs/STORAGE_SAVER.md
 !tests/
 !tests/test_*.py
 !.github/

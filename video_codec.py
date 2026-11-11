@@ -28,6 +28,78 @@ def probe(path):
     )
 
 
+def remux_original_quality(source, target):
+    """Change container metadata for a fresh upload without re-encoding streams.
+
+    Google deduplicates by upload hash even after rewriting a Storage saver
+    item. A distinct container permits a new Original-quality upload.
+    """
+    source, target = Path(source), Path(target)
+
+    def stream_hash(path):
+        return run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                path,
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-f",
+                "streamhash",
+                "-hash",
+                "sha256",
+                "-",
+            ]
+        )
+
+    if target.exists():
+        if stream_hash(source) != stream_hash(target):
+            raise RuntimeError("Existing remux does not preserve encoded streams")
+        return
+    with tempfile.TemporaryDirectory(dir=target.parent) as td:
+        pending = Path(td) / "original-quality.mp4"
+        run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-nostdin",
+                "-i",
+                source,
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-map_metadata",
+                "0",
+                "-metadata",
+                "comment=google-photos-cli original-quality preservation",
+                "-movflags",
+                "+faststart",
+                pending,
+            ]
+        )
+        before, after = probe(source), probe(pending)
+        if (
+            abs(
+                float(before["format"]["duration"]) - float(after["format"]["duration"])
+            )
+            > 0.1
+        ):
+            raise RuntimeError("Remux changed video duration")
+        if [(s["codec_type"], s["codec_name"]) for s in before["streams"]] != [
+            (s["codec_type"], s["codec_name"]) for s in after["streams"]
+        ]:
+            raise RuntimeError("Remux changed streams")
+        if stream_hash(source) != stream_hash(pending):
+            raise RuntimeError("Remux changed encoded stream bytes")
+        pending.replace(target)
+
+
 def encode(source, target, timestamp, crf=35, preset=8, threads=4, codec="hevc"):
     source, target = Path(source), Path(target)
     if target.exists():

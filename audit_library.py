@@ -102,6 +102,13 @@ def audit(root=ROOT, verbose=True, selection=None):
             problems.append({"key": key, "problem": "capture date or timezone changed"})
         if current[5] != s.get(size_field):
             problems.append({"key": key, "problem": "stored replacement size changed"})
+        if size_field == "encoded_bytes" and at(ext, 0, 30, 2) != 2:
+            problems.append(
+                {
+                    "key": key,
+                    "problem": "video replacement is not backed up in Original quality",
+                }
+            )
         if not album_ids(expected) <= album_ids(ext):
             problems.append(
                 {"key": key, "problem": "original album membership missing"}

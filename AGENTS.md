@@ -16,6 +16,7 @@ Cloud writes are opt-in through `--apply`; preview is the default. Respect a use
 - Use `pLFTfd` original export. Other download endpoints can return compatibility JPEGs/transcoded video, including for canonical AVIF/MP4 uploads. Processing delays must cause a wait, not a weakened check.
 - Preserve reported writable album memberships and descriptions; retain favorites/archive flags. Never alter album access lists.
 - Videos must fully decode locally, retain duration/audio presence, expose cloud playback variants, and be smaller before source removal.
+- Require Google's Original-quality flag before removing a video source. Storage saver can asynchronously replace an initially byte-identical HEVC upload with VP9 and different bytes/size. See `docs/STORAGE_SAVER.md`. Do not automatically change account settings. `videos --repair --apply` remuxes retained encoded streams, verifies the new Original-quality upload, removes the superseded candidate, and updates the original authoritative journal without changing its baseline size.
 - Read back Trash after moving originals. A successful HTTP response is insufficient.
 - Fresh audits must reconcile every expected original/replacement and distinguish a filtered selection from the whole library. Never claim complete library migration based on a sample or cached inventory alone.
 

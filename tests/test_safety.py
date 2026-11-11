@@ -145,6 +145,18 @@ class TrashRecovery(unittest.TestCase):
             self.assertTrue(videos.finalize(s))
             self.assertEqual(s["stage"], "trashed")
 
+    def test_storage_saver_video_never_removes_source(self):
+        from video_migration import Videos
+
+        er = [None] * 31
+        er[30] = [1, 100, 1]
+        videos = Videos.__new__(Videos)
+        videos.api = FakeAPI([["new"]], [er])
+        state = {"stage": "uploaded", "replacement_key": "new", "original_ext": [er]}
+        with self.assertRaisesRegex(RuntimeError, "Original quality"):
+            videos.finalize(state)
+        self.assertEqual(videos.api.trashed, [])
+
 
 if __name__ == "__main__":
     unittest.main()

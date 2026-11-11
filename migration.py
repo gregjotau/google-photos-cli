@@ -495,11 +495,13 @@ class Migration:
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as pool:
             futures = [pool.submit(task, row) for row in rows]
             done = 0
+            last_drain = 0.0
             for future in concurrent.futures.as_completed(futures):
                 future.result()
                 done += 1
-                if done % 20 == 0:
+                if done % 20 == 0 and time.monotonic() - last_drain >= 5:
                     self.drain()
+                    last_drain = time.monotonic()
                 if done % 100 == 0:
                     self.log(
                         "progress",

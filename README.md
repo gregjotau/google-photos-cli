@@ -6,7 +6,7 @@ Batch-convert Google Photos images to AVIF and optimize videos as HEVC MP4, with
 
 **Python 3.15+, one `uv run` entry point, native encoders, no `requirements.txt`.** Python dependencies are declared inline in the script using PEP 723 and resolved by uv. You clone the repository because the entry point imports its companion modules.
 
-This is an independent, experimental client using Google's undocumented web API. It has been exercised against a real library, but a complete migration of that library is still being validated. Google can change the protocol. Keep an independent backup and try a small batch first. Originals are moved to recoverable Google Photos Trash only after verification; the tool never empties Trash. Google's own Trash retention rules still apply.
+This is an independent, experimental client using Google's undocumented web API. A complete real-library migration has passed a fresh, fully paginated audit, including corrected Original-quality video uploads. Google can change the protocol. Keep an independent backup and try a small batch first. Originals are moved to recoverable Google Photos Trash only after verification; the tool never empties Trash. Google's own Trash retention rules still apply.
 
 ## Install
 
@@ -32,6 +32,10 @@ uv run google-photos-cli.py connect
 ```
 
 Sign in to the intended Google account in the opened Chrome window. Allow the connection to the local device if Chrome asks. Keep that terminal and tab open. This uses a separate persistent Chrome profile; it does not read your normal Chrome profile or export Google cookies to Python.
+
+**Before optimizing videos, set Google Photos → Settings → Backup quality to Original quality.** This preserves the small files already compressed by this tool. Storage saver can asynchronously rewrite an uploaded HEVC file into a larger, different file even after an initial byte-identical verification. The client refuses to trash a video source unless Google reports Original quality for its replacement. Changing the setting affects your web upload preference; the CLI does not change it automatically.
+
+See the [measured Storage saver issue and recovery procedure](docs/STORAGE_SAVER.md): one HEVC upload grew from 3.77 MB to a 10.43 MB VP9 original export. This is a reason to use Original quality for this optimizer's output, not a blanket recommendation against Storage saver for other media. Downloaded file size and billed storage quota are separate measurements.
 
 In terminal 2, in the same repository:
 

@@ -144,6 +144,13 @@ class Videos:
         )
         if not info or not ext:
             return False
+        quality = at(ext, 0, 30, 2)
+        if quality is None:
+            return False
+        if quality != 2:
+            raise RuntimeError(
+                "Video replacement uses Google Storage saver, which can rewrite HEVC after verification. Set web backup quality to Original quality before uploading. Source retained; see README recovery notes."
+            )
         e = ext[0]
         v = attrs(info[0]).get("76647426")
         if not v or not at(v, 0) or not at(v, 7):
