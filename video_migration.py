@@ -5,7 +5,7 @@ from pathlib import Path
 from photos_api import API, ROOT, at, original_files, upload
 from converter import backup_file
 from migration import save, attrs, is_video, album_ids
-from video_codec import encode, probe
+from video_codec import encode, probe, validate_encoded
 from selection import Selection
 
 WORK = ROOT / "work-video"
@@ -115,6 +115,8 @@ class Videos:
             raise RuntimeError("Video original backup changed; upload refused")
         if not target.exists():
             self.write(s, conversion=encode(source, target, er[3], codec="hevc"))
+        elif not s.get("conversion"):
+            self.write(s, conversion=validate_encoded(source, target))
         if target.stat().st_size >= er[5]:
             self.write(
                 s,
@@ -128,7 +130,8 @@ class Videos:
             self.write(s, **kw)
 
         encoded_sha = sha(target)
-        if s.get("encoded_sha256") and s["encoded_sha256"] != encoded_sha:
+        recorded_sha = s.get("encoded_sha256") or s.get("conversion", {}).get("sha256")
+        if recorded_sha and recorded_sha != encoded_sha:
             raise RuntimeError("Encoded video changed since journal; upload refused")
         self.write(s, encoded_sha256=encoded_sha, encoded_bytes=target.stat().st_size)
         new = upload(
@@ -200,7 +203,7 @@ class Videos:
             return False
         expected = s.get("conversion", {}).get("duration")
         if expected is None:
-            expected = float(probe(s["output"])["format"]["duration"])
+            expected = float(probe(s["source"])["format"]["duration"])
         if abs(v[0] / 1000 - expected) > 0.3:
             raise RuntimeError("Cloud video duration mismatch")
         if e[5] != s["encoded_bytes"]:

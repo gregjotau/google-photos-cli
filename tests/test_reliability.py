@@ -19,6 +19,45 @@ import test_removal
 
 
 class Recovery(unittest.TestCase):
+    def test_recovered_encoded_video_cannot_be_shorter_than_original(self):
+        from video_codec import validate_encoded
+
+        before = dict(
+            format={"duration": "10"},
+            streams=[{"codec_type": "video", "avg_frame_rate": "30/1"}],
+        )
+        after = dict(
+            format={"duration": "2"},
+            streams=[{"codec_type": "video", "codec_name": "hevc"}],
+        )
+        with (
+            patch("video_codec.probe", return_value=after),
+            patch("video_codec.run") as decoder,
+            self.assertRaisesRegex(RuntimeError, "duration mismatch against original"),
+        ):
+            validate_encoded("source", "encoded", before=before)
+        decoder.assert_not_called()
+
+    def test_recovered_encoded_video_cannot_lose_audio(self):
+        from video_codec import validate_encoded
+
+        before = dict(
+            format={"duration": "10"},
+            streams=[
+                {"codec_type": "video", "avg_frame_rate": "30/1"},
+                {"codec_type": "audio"},
+            ],
+        )
+        after = dict(
+            format={"duration": "10"},
+            streams=[{"codec_type": "video", "codec_name": "hevc"}],
+        )
+        with (
+            patch("video_codec.probe", return_value=after),
+            self.assertRaisesRegex(RuntimeError, "audio presence mismatch"),
+        ):
+            validate_encoded("source", "encoded", before=before)
+
     def test_ambiguous_commit_never_starts_another_upload(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "output.avif"

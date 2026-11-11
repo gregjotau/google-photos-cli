@@ -124,6 +124,39 @@ class CommitRecovery(unittest.TestCase):
 
 
 class TrashRecovery(unittest.TestCase):
+    def test_cloud_duration_fallback_uses_original_not_encoded_file(self):
+        from video_migration import Videos
+
+        er = [None] * 31
+        er[0], er[30] = "new", [1, 100, 2]
+        info = [
+            [
+                "new",
+                None,
+                None,
+                "dedup",
+                {"76647426": [1000, None, None, None, None, None, None, True]},
+            ]
+        ]
+        worker = Videos.__new__(Videos)
+        worker.api = FakeAPI(info, [er])
+        state = dict(
+            stage="uploaded",
+            replacement_key="new",
+            original_ext=[er],
+            source="original.mp4",
+            output="encoded.mp4",
+        )
+        with (
+            patch(
+                "video_migration.probe", return_value={"format": {"duration": "10"}}
+            ) as probe,
+            self.assertRaisesRegex(RuntimeError, "Cloud video duration mismatch"),
+        ):
+            worker.finalize(state)
+        probe.assert_called_once_with("original.mp4")
+        self.assertEqual(worker.api.trashed, [])
+
     def test_interrupted_removal_can_be_found_beyond_recent_page(self):
         api = API.__new__(API)
         calls = []

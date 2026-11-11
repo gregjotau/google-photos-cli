@@ -13,7 +13,7 @@ This client uses an undocumented Google Photos web protocol. The tested full-lib
 | Default permanent intent | New verified sources wait in Trash until `--confirm-permanent-delete` is supplied |
 | `--delete-mode trash` | Retain recoverable Google Trash; local backups remain mandatory |
 
-Do not permanently remove cloud originals until you have checked that the backups are readable, complete and on a disk you intend to keep. File integrity is not visual quality: inspect the smoke-test images and videos yourself. The settings are intentionally lossy. Keep specialized/HDR/RAW assets outside the conversion scope if their original presentation matters.
+Do not permanently remove cloud originals until you have checked that the backups are readable, complete and on a disk you intend to keep. File integrity is not visual quality: inspect the smoke-test images and videos yourself. The settings are intentionally lossy. Keep specialized/HDR/RAW assets outside the conversion scope if their original presentation matters. Avoid editing or reorganizing the selected media during a migration: metadata is based on its initial snapshot, not continuous synchronization.
 
 Google says Trash does not count toward account storage. Permanent deletion removes recovery; it is not an extra quota-saving step. The CLI never empties unrelated Trash, upgrades old completed Trash-mode journals, or touches Locked Folder.
 
@@ -102,6 +102,7 @@ Keep journals for future runs. AVIF filenames can be skipped without a download,
 
 - Every new replacement gets a byte-identical true-original export check before source removal. Normal audits fetch current cloud metadata and check recorded proofs. `audit --verify-exports` additionally downloads current replacements and re-hashes their bytes; it uses more time, network traffic and temporary disk space.
 - `verify-backups` is entirely local and hashes all selected journaled original components. A skipped AVIF with no downloaded original is not counted as a backed-up original. Strict recorded-size mismatches are reported even if a local file's recorded hash matches; investigate before irreversible removal.
+- Recovered video outputs without an encode journal are fully decoded and compared with the retained original's duration/audio before upload. Recorded output hashes must still match. The cloud duration fallback always references the original source, never the output being verified.
 - Local hashes and SHA-1 upload fingerprints are streamed. Video exports are extracted to generated temporary filenames, never trusted ZIP paths. Small image batch exports still use bounded batches in memory.
 - The worker runs at most six tasks concurrently. Native AOM/x265 encoders do the expensive computation; Python coordinates them. Increase image workers only if CPU, RAM and disk have headroom. Running more processes bypasses useful bounds and increases throttling risk.
 - Catalog checkpointing may replay up to 999 metadata reads after a hard crash, but never marks missing metadata complete. This reduces large-library JSON rewrite work without changing mutation gates.

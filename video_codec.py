@@ -29,6 +29,72 @@ def probe(path):
     )
 
 
+def frame_rate(stream):
+    for field in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            rate = float(Fraction(stream.get(field) or "0"))
+            if rate > 0:
+                return rate
+        except (ValueError, ZeroDivisionError):
+            pass
+    return None
+
+
+def validate_encoded(source, target, *, before=None, codec="hevc"):
+    """Validate a new or recovered output against the retained SOURCE."""
+    before = before or probe(source)
+    after = probe(target)
+    original = next(s for s in before["streams"] if s["codec_type"] == "video")
+    video = next(s for s in after["streams"] if s["codec_type"] == "video")
+    if video["codec_name"] != codec:
+        raise RuntimeError("Unexpected video codec")
+    duration = float(before["format"]["duration"])
+    encoded_duration = float(after["format"]["duration"])
+    if abs(duration - encoded_duration) > max(
+        0.25, 1 / max(frame_rate(original) or 30, 1)
+    ):
+        raise RuntimeError("Encoded duration mismatch against original source")
+    has_audio = lambda p: any(s["codec_type"] == "audio" for s in p["streams"])
+    if has_audio(before) != has_audio(after):
+        raise RuntimeError("Encoded audio presence mismatch against original source")
+    width, height = video["width"], video["height"]
+    rate = frame_rate(video)
+    if (
+        min(width, height) > 1080
+        or max(width, height) > 1920
+        or rate is None
+        or rate > 30.01
+    ):
+        raise RuntimeError("Encoded dimensions/frame rate exceed optimization limits")
+    if codec == "hevc" and (
+        video.get("codec_tag_string") != "hvc1" or video.get("pix_fmt") != "yuv420p10le"
+    ):
+        raise RuntimeError("Expected HEVC Main10/hvc1 output")
+    run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-nostdin",
+            "-i",
+            target,
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    return {
+        "sha256": digest(target),
+        "duration": encoded_duration,
+        "width": width,
+        "height": height,
+        "codec": codec,
+    }
+
+
 def remux_original_quality(source, target):
     """Change container metadata for a fresh upload without re-encoding streams.
 
@@ -107,15 +173,7 @@ def encode(source, target, timestamp, crf=35, preset=8, threads=4, codec="hevc")
         raise RuntimeError("Video output already exists")
     before = probe(source)
     v = next(s for s in before["streams"] if s["codec_type"] == "video")
-    fps = None
-    for field in ("avg_frame_rate", "r_frame_rate"):
-        try:
-            candidate = float(Fraction(v.get(field) or "0"))
-            if candidate > 0:
-                fps = candidate
-                break
-        except (ValueError, ZeroDivisionError):
-            pass
+    fps = frame_rate(v)
     scale = "scale=w='min(iw,if(gte(iw,ih),1920,1080))':h='min(ih,if(gte(iw,ih),1080,1920))':force_original_aspect_ratio=decrease:force_divisible_by=2"
     if fps is None or fps > 30.01:
         scale += ",fps=30"
@@ -131,6 +189,9 @@ def encode(source, target, timestamp, crf=35, preset=8, threads=4, codec="hevc")
             "-hide_banner",
             "-loglevel",
             "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
             "-nostdin",
             "-i",
             source,
@@ -173,43 +234,12 @@ def encode(source, target, timestamp, crf=35, preset=8, threads=4, codec="hevc")
             pending,
         ]
         run(args)
-        after = probe(pending)
-        nv = next(s for s in after["streams"] if s["codec_type"] == "video")
-        if nv["codec_name"] != codec:
-            raise RuntimeError("Unexpected video codec")
-        dur = float(before["format"]["duration"])
-        ndur = float(after["format"]["duration"])
-        if abs(dur - ndur) > max(0.25, 1 / max(fps or 30, 1)):
-            raise RuntimeError("Encoded duration mismatch")
-        if any(s["codec_type"] == "audio" for s in before["streams"]) and not any(
-            s["codec_type"] == "audio" for s in after["streams"]
-        ):
-            raise RuntimeError("Audio lost")
-        run(
-            [
-                "ffmpeg",
-                "-v",
-                "error",
-                "-xerror",
-                "-err_detect",
-                "explode",
-                "-nostdin",
-                "-i",
-                pending,
-                "-f",
-                "null",
-                "-",
-            ]
-        )
+        validation = validate_encoded(source, pending, before=before, codec=codec)
         pending.replace(target)
     return {
         "original_bytes": source.stat().st_size,
         "encoded_bytes": target.stat().st_size,
-        "sha256": digest(target),
-        "duration": ndur,
-        "width": nv["width"],
-        "height": nv["height"],
-        "codec": codec,
+        **validation,
         "crf": 30 if codec == "hevc" else crf,
         "preset": "medium" if codec == "hevc" else preset,
     }
