@@ -7,6 +7,7 @@ This client uses an undocumented Google Photos web protocol. The tested full-lib
 | Choice | Behavior |
 | --- | --- |
 | `--year 2023` | Capture year with the recorded UTC offset; keep it on every scoped command |
+| `--batch-size 1` | One selected asset per verification/removal barrier; default combined cohort is 10 |
 | `--limit 5` | Stable first five matches, including completed/kept items; rerunning does not advance to the next five |
 | Default Live Photo policy | One AVIF still; original still and motion components remain locally backed up |
 | `--live-photos keep` | Leave combined Live/Motion Photos unchanged in Google Photos |
@@ -45,21 +46,25 @@ uv run --locked google-photos-cli.py verify-backups --year 2023 --limit 5
 uv run --locked google-photos-cli.py audit --year 2023 --limit 5 --verify-exports
 ```
 
-The sample audit may also exit 2 while `pending_permanent_deletions` is nonempty. Check `media_complete`, the output files, cloud dates/albums and playback; investigate other errors rather than assuming every exit 2 is harmless. Continue without the sample limit only after the sample meets your needs:
+The sample audit may also exit 2 while `pending_permanent_deletions` is nonempty. Check `media_complete`, the output files, cloud dates/albums and playback; investigate other errors rather than assuming every exit 2 is harmless. Review the sample's private `permanent-delete-plan.json`, then approve and finish that scope:
 
 ```sh
-uv run --locked google-photos-cli.py run --year 2023 --apply
-uv run --locked google-photos-cli.py verify-backups --year 2023
-uv run --locked google-photos-cli.py purge-originals --year 2023
+uv run --locked google-photos-cli.py purge-originals --year 2023 --limit 5
+uv run --locked google-photos-cli.py purge-originals --year 2023 --limit 5 --apply --confirm-permanent-delete
 ```
 
-Review the private `permanent-delete-plan.json` in the data directory. It identifies each original and replacement and the local backup files/checksums. After approving that exact scope, permanently finish removal:
+Once the full year is authorized, continue with incremental permanent removal:
 
 ```sh
-uv run --locked google-photos-cli.py purge-originals --year 2023 --apply --confirm-permanent-delete
+uv run --locked google-photos-cli.py run --year 2023 --batch-size 10 --apply --confirm-permanent-delete
+uv run --locked google-photos-cli.py verify-backups --year 2023
 uv run --locked google-photos-cli.py audit --year 2023 --verify-exports
 uv run --locked google-photos-cli.py report
 ```
+
+Each cohort must finish verification and source cleanup before the next cohort begins. Videos have an additional one-at-a-time barrier. `--batch-size 1` minimizes temporary cloud usage. A failed deletion or stalled verification stops admission of new cohorts. Already verified sources can remain in Trash if a cohort is interrupted; resume the same command or use the scoped `purge-originals` command to reconcile them.
+
+Clients with per-batch action-time confirmation must use repeated small conversion-and-confirm cycles. For example, after the first five finish, `--limit 10` includes the same five completed sources plus the next five, then `--limit 15` includes the next five. Never drop the year filter or purge unrelated Trash. Do not postpone all source cleanup until the entire library has been uploaded.
 
 `report` summarizes all confirmed replacements in this data directory, not a year-filtered subset. The filtered audit defines which selection has passed. It is not a claim about other years. Replace every `--year 2023` consistently if choosing another scope, or remove it everywhere for an authorized whole-library migration.
 
@@ -104,6 +109,7 @@ Keep journals for future runs. AVIF filenames can be skipped without a download,
 - `verify-backups` is entirely local and hashes all selected journaled original components. A skipped AVIF with no downloaded original is not counted as a backed-up original. Differences between the recorded download size and Google's reported upload size are reported separately from checksum failures. Permanent removal can accept that difference only for a single-file backup with an explicitly recorded, identity-bound `pLFTfd` true-original export proof. Legacy journals are never silently granted this provenance. Live Photo component totals remain strict. A legacy backup with no recorded checksum is reported as unverifiable; do not create a checksum retroactively and call that historical proof.
 - Recovered video outputs without an encode journal are fully decoded and compared with the retained original's duration/audio before upload. Recorded output hashes must still match. The cloud duration fallback always references the original source, never the output being verified.
 - Local hashes and SHA-1 upload fingerprints are streamed. Video exports are extracted to generated temporary filenames, never trusted ZIP paths. Small image batch exports still use bounded batches in memory.
+- Combined cohorts admit at most `--batch-size` selected assets at once, default 10. Standalone video processing verifies/removes one source before admitting the next. An asset-count bound is not a byte/quota guarantee: one replacement must fit, and Google quota updates may lag. Some older backups are quota-exempt, whereas new Original-quality uploads consume storage; smaller replacements can therefore increase billed usage. Check the account during the smoke test, and see [Google's policy](https://support.google.com/photos/answer/10100180?hl=en). Never delete an unverified source to free space.
 - The worker runs at most six tasks concurrently. Native AOM/x265 encoders do the expensive computation; Python coordinates them. Increase image workers only if CPU, RAM and disk have headroom. Running more processes bypasses useful bounds and increases throttling risk.
 - Catalog checkpointing may replay up to 999 metadata reads after a hard crash, but never marks missing metadata complete. This reduces large-library JSON rewrite work without changing mutation gates.
 - Deadlines prevent queued tasks from starting after expiry. They cannot undo a Google request already in flight. Automatic retries apply only to explicitly read-only RPCs; commit intent and Trash readback remain authoritative for recovery.

@@ -157,6 +157,15 @@ def parser():
             action="store_true",
             help="Explicitly authorize permanent removal of only backed-up, verified originals in this selection",
         )
+    for command in (mig, combined):
+        command.add_argument(
+            "--batch-size",
+            type=int,
+            choices=range(1, 51),
+            default=10,
+            metavar="1..50",
+            help="Maximum cohort before verification/removal; use 1 for minimal temporary storage",
+        )
     sub.add_parser("status", help="Show journal counts and measured file savings")
     sub.add_parser(
         "report",
@@ -688,39 +697,58 @@ def main():
             raise SystemExit(2)
     elif args.command == "videos":
         from video_migration import Videos
+        from removal import IncrementalRemoval
+
+        cleanup = IncrementalRemoval(
+            root, selection, confirmed=args.confirm_permanent_delete
+        )
 
         if args.repair:
             from video_repair import VideoRepair
 
-            worker = VideoRepair(selection=selection)
+            worker = VideoRepair(selection=selection, after_batch=cleanup)
         else:
-            worker = Videos(selection=selection)
+            worker = Videos(selection=selection, after_batch=cleanup)
         errors, waiting = worker.run()
         if errors or waiting:
             raise SystemExit(2)
         complete_workflow(root, selection, args)
     elif args.command == "run":
         import concurrent.futures
+        import threading
         from video_migration import Videos
+        from removal import IncrementalRemoval
+        from workflow import batches
 
-        def images():
-            return Migration(
-                args.quality,
-                args.speed,
-                args.threads,
-                args.workers,
-                selection=selection,
-            ).run()
-
-        def videos():
-            return Videos(selection=selection).run()
+        stop = threading.Event()
+        cleanup = IncrementalRemoval(
+            root, selection, confirmed=args.confirm_permanent_delete
+        )
+        images = Migration(
+            args.quality,
+            args.speed,
+            args.threads,
+            args.workers,
+            selection=selection,
+            batch_size=args.batch_size,
+            after_batch=cleanup,
+            stop_event=stop,
+        )
+        videos = Videos(selection=selection, after_batch=cleanup, stop_event=stop)
+        rows = selection.select(images.inventory, images.catalog)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            image_job = pool.submit(images)
-            video_job = pool.submit(videos)
-            outcomes = [image_job.result(), video_job.result()]
-        if any(errors or waiting for errors, waiting in outcomes):
-            raise SystemExit(2)
+            for group in batches(rows, args.batch_size):
+                image_job = pool.submit(images.run, rows=group)
+                video_job = pool.submit(videos.run, rows=group)
+                try:
+                    outcomes = [image_job.result(), video_job.result()]
+                except BaseException:
+                    stop.set()
+                    raise
+                if any(errors or waiting for errors, waiting in outcomes):
+                    stop.set()
+                    raise SystemExit(2)
         complete_workflow(root, selection, args)
     elif args.command == "scan":
         if args.append:
@@ -737,8 +765,18 @@ def main():
     elif args.command == "catalog":
         catalog(root, API(), json.loads((root / "inventory-api.json").read_text()))
     elif args.command == "migrate":
+        from removal import IncrementalRemoval
+
         errors, waiting = Migration(
-            args.quality, args.speed, args.threads, args.workers, selection=selection
+            args.quality,
+            args.speed,
+            args.threads,
+            args.workers,
+            selection=selection,
+            batch_size=args.batch_size,
+            after_batch=IncrementalRemoval(
+                root, selection, confirmed=args.confirm_permanent_delete
+            ),
         ).run()
         print(json.dumps(status(root), indent=2))
         if errors or waiting:

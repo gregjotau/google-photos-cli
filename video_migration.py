@@ -1,6 +1,6 @@
 """HEVC/AAC-in-MP4 storage optimization with verified playback readiness."""
 
-import concurrent.futures, hashlib, json, time, threading
+import hashlib, json, time, threading
 from pathlib import Path
 from photos_api import API, ROOT, at, original_files, upload
 from converter import backup_file
@@ -20,9 +20,11 @@ def sha(path):
 
 
 class Videos:
-    def __init__(self, selection=None):
+    def __init__(self, selection=None, after_batch=None, stop_event=None):
         self.selection = selection or Selection()
         self.errors = []
+        self.after_batch = after_batch
+        self.stop_event = stop_event or threading.Event()
         self.api = API()
         self.account = self.api.call({"op": "hello"})["account"]
         self.inv = json.loads((ROOT / "inventory-api.json").read_text())
@@ -285,8 +287,14 @@ class Videos:
                 self.write(s, error=str(e))
                 self.log("finalize_error", key=s["original_key"], error=str(e))
 
-    def run(self, limit=None):
-        rows = [r for r in self.selection.select(self.inv, self.cat) if is_video(r)]
+    def run(self, limit=None, rows=None):
+        rows = [
+            r
+            for r in (
+                rows if rows is not None else self.selection.select(self.inv, self.cat)
+            )
+            if is_video(r)
+        ]
         if limit:
             rows = rows[:limit]
 
@@ -303,16 +311,22 @@ class Videos:
                 self.errors.append(row[0])
                 self.write(s, error=str(e))
                 self.log("item_error", key=row[0], error=str(e))
+                self.stop_event.set()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            for n, _ in enumerate(pool.map(task, rows)):
-                if n % 3 == 0:
-                    self.drain()
-        end = time.monotonic() + 3600
-        while self.waiting and time.monotonic() < end:
-            self.drain()
-            if self.waiting:
-                self.log("awaiting_processing", count=len(self.waiting))
-                time.sleep(20)
+        from workflow import run_batches
+
+        run_batches(
+            rows,
+            task=task,
+            drain=self.drain,
+            errors=self.errors,
+            waiting=lambda: self.waiting,
+            workers=1,
+            batch_size=1,
+            after_batch=self.after_batch,
+            stop_event=self.stop_event,
+            timeout=3600,
+            pause=3,
+        )
         self.log("pass_finished", waiting=len(self.waiting))
         return self.errors, self.waiting

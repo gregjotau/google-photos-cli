@@ -18,6 +18,7 @@
 !audit_library.py
 !removal.py
 !diagnostics.py
+!workflow.py
 !docs/OPERATIONS.md
 !docs/
 !docs/STORAGE_SAVER.md

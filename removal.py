@@ -6,6 +6,7 @@ are never upgraded to permanent mode by a rerun.
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from converter import digest
@@ -13,12 +14,22 @@ from migration import album_ids, is_video, save
 from photos_api import API, at
 
 
-def records(root, selection):
+def load_scope(root, selection):
     inv = json.loads((root / "inventory-api.json").read_text())
     cat = json.loads((root / "catalog-api.json").read_text())
     if inv["account"] != cat["account"]:
         raise RuntimeError("Removal catalog account mismatch")
-    for row in selection.select(inv, cat):
+    return inv["account"], {r[0]: r for r in selection.select(inv, cat)}
+
+
+def records(root, selection, source_keys=None, scope=None):
+    account, rows = scope if scope is not None else load_scope(root, selection)
+    selected = (
+        rows.values()
+        if source_keys is None
+        else (rows[k] for k in sorted(source_keys) if k in rows)
+    )
+    for row in selected:
         path = (
             root
             / ("work-video" if is_video(row) else "work-api")
@@ -35,7 +46,7 @@ def records(root, selection):
                 raise RuntimeError(
                     "Original metadata identity differs from selected inventory item"
                 )
-            yield path, state, inv["account"]
+            yield path, state, account
 
 
 def canonical_export_proof(state):
@@ -151,10 +162,10 @@ def downgrade_to_trash(root, selection):
         save(path, s)
 
 
-def create_plan(root, selection):
+def create_plan(root, selection, source_keys=None, scope=None):
     items = []
     account = None
-    for path, s, expected in records(root, selection):
+    for path, s, expected in records(root, selection, source_keys, scope):
         account = expected
         if (
             s.get("deletion_mode") != "permanent"
@@ -215,10 +226,12 @@ def summary(plan):
     }
 
 
-def execute(root, selection, *, confirmed=False, api=None):
+def execute(
+    root, selection, *, confirmed=False, api=None, source_keys=None, scope=None
+):
     if confirmed is not True:
         raise ValueError("Explicit permanent-deletion confirmation is required")
-    plan = create_plan(root, selection)
+    plan = create_plan(root, selection, source_keys, scope)
     if not plan["items"]:
         return 0
     api = api or API()
@@ -319,3 +332,49 @@ def execute(root, selection, *, confirmed=False, api=None):
             save(Path(item["journal"]), s)
             count += 1
     return count
+
+
+class IncrementalRemoval:
+    """Serialize plans/deletions for concurrently running image/video cohorts."""
+
+    def __init__(self, root, selection, *, confirmed=False):
+        self.root = root
+        self.selection = selection
+        self.confirmed = confirmed
+        self.lock = threading.Lock()
+        self.scope = None
+
+    def __call__(self, keys):
+        if not self.confirmed or self.selection.delete_mode != "permanent":
+            return
+        # Never touch a different year/album or another batch's pending Trash.
+        with self.lock:
+            candidates = set()
+            for key in keys:
+                for folder in ("work-api", "work-video"):
+                    path = self.root / folder / key / "state.json"
+                    if not path.exists():
+                        continue
+                    state = json.loads(path.read_text())
+                    if (
+                        state.get("deletion_mode") == "permanent"
+                        and state.get("stage") == "trashed"
+                        and not state.get("original_deleted_permanently")
+                    ):
+                        candidates.add(key)
+            if candidates:
+                if self.scope is None:
+                    self.scope = load_scope(self.root, self.selection)
+                count = execute(
+                    self.root,
+                    self.selection,
+                    confirmed=True,
+                    source_keys=candidates,
+                    scope=self.scope,
+                )
+                print(
+                    json.dumps(
+                        {"event": "originals_permanently_deleted", "count": count}
+                    ),
+                    flush=True,
+                )

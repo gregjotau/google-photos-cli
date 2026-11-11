@@ -31,12 +31,25 @@ def is_video(row):
 
 
 class Migration:
-    def __init__(self, quality=45, speed=6, threads=3, workers=4, selection=None):
+    def __init__(
+        self,
+        quality=45,
+        speed=6,
+        threads=3,
+        workers=4,
+        selection=None,
+        batch_size=10,
+        after_batch=None,
+        stop_event=None,
+    ):
         self.api = API()
         self.quality = quality
         self.speed = speed
         self.threads = threads
         self.workers = workers
+        self.batch_size = batch_size
+        self.after_batch = after_batch
+        self.stop_event = stop_event or threading.Event()
         self.selection = selection or Selection()
         self.inventory = json.loads((ROOT / "inventory-api.json").read_text())
         self.catalog = json.loads((ROOT / "catalog-api.json").read_text())
@@ -592,7 +605,7 @@ class Migration:
         with self.wait_lock:
             self.waiting.extend(remaining)
 
-    def run(self, limit=None):
+    def run(self, limit=None, rows=None):
         def task(row):
             try:
                 prepared = self.prepare(row, None)
@@ -603,8 +616,17 @@ class Migration:
                 self.write(state, error=str(e))
                 self.errors.append(row[0])
                 self.log("item_error", key=row[0], error=str(e))
+                self.stop_event.set()
 
-        rows = self.selection.select(self.inventory, self.catalog)
+        rows = [
+            r
+            for r in (
+                rows
+                if rows is not None
+                else self.selection.select(self.inventory, self.catalog)
+            )
+            if not is_video(r)
+        ]
         if limit is not None:
             chosen = []
             for row in rows:
@@ -617,28 +639,20 @@ class Migration:
                 if len(chosen) >= limit:
                     break
             rows = chosen
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as pool:
-            futures = [pool.submit(task, row) for row in rows]
-            done = 0
-            last_drain = 0.0
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
-                done += 1
-                if done % 20 == 0 and time.monotonic() - last_drain >= 5:
-                    self.drain()
-                    last_drain = time.monotonic()
-                if done % 100 == 0:
-                    self.log(
-                        "progress",
-                        processed=done,
-                        total=len(rows),
-                        errors=len(self.errors),
-                    )
-        end = time.monotonic() + 1800
-        while self.waiting and time.monotonic() < end:
-            self.drain(True)
-            if self.waiting:
-                self.log("awaiting_processing", count=len(self.waiting))
-                time.sleep(10)
+        from workflow import run_batches
+
+        run_batches(
+            rows,
+            task=task,
+            drain=self.drain,
+            errors=self.errors,
+            waiting=lambda: self.waiting,
+            workers=self.workers,
+            batch_size=self.batch_size,
+            after_batch=self.after_batch,
+            stop_event=self.stop_event,
+            timeout=1800,
+            pause=2,
+        )
         self.log("pass_finished", errors=len(self.errors), waiting=len(self.waiting))
         return self.errors, self.waiting
