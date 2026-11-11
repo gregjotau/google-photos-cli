@@ -2,12 +2,13 @@
 
 import json
 from pathlib import Path
-from photos_api import API, ROOT, at, originals
+from photos_api import API, ROOT, at, original_files
+from converter import digest
 from migration import attrs, is_video, save, album_ids
 from selection import Selection
 
 
-def audit(root=ROOT, verbose=True, selection=None):
+def audit(root=ROOT, verbose=True, selection=None, verify_exports=False):
     selection = selection or Selection()
     import importlib.util
 
@@ -23,12 +24,21 @@ def audit(root=ROOT, verbose=True, selection=None):
     if old.exists():
         old.unlink()
     cat = cli.catalog(root, api, inv, "audit-catalog.json")
-    states = [
-        json.loads(p.read_text()) for p in (root / "work-api").glob("*/state.json")
-    ]
-    vst = [
-        json.loads(p.read_text()) for p in (root / "work-video").glob("*/state.json")
-    ]
+
+    def load_journals(folder):
+        records = []
+        for path in (root / folder).glob("*/state.json"):
+            state = json.loads(path.read_text())
+            if (
+                state.get("account") != inv["account"]
+                or state.get("original_key") != path.parent.name
+            ):
+                raise RuntimeError("Audit journal account or source identity mismatch")
+            records.append(state)
+        return records
+
+    states = load_journals("work-api")
+    vst = load_journals("work-video")
     scoped = bool(selection and selection.filtered)
     scope = None
     if scoped:
@@ -68,6 +78,7 @@ def audit(root=ROOT, verbose=True, selection=None):
         else:
             bad.append(entry)
     active = {r[0] for r in inv["items"]}
+    active_rows = {r[0]: r for r in inv["items"]}
     problems = []
     proof_keys = set()
     original_inv = json.loads((root / "inventory-api.json").read_text())
@@ -100,17 +111,22 @@ def audit(root=ROOT, verbose=True, selection=None):
         ext = cat["items"].get(key)
         expected = s.get("original_ext")
         if not ext or not expected:
+            problems.append(
+                {"key": key, "problem": "replacement or original metadata missing"}
+            )
             return
+        if s.get("account") != inv["account"]:
+            problems.append({"key": key, "problem": "journal account mismatch"})
         current, original = ext[0], expected[0]
         if current[3:5] != original[3:5]:
             problems.append({"key": key, "problem": "capture date or timezone changed"})
         if current[5] != s.get(size_field):
             problems.append({"key": key, "problem": "stored replacement size changed"})
-        if size_field == "encoded_bytes" and at(ext, 0, 30, 2) != 2:
+        if at(ext, 0, 30, 2) != 2:
             problems.append(
                 {
                     "key": key,
-                    "problem": "video replacement is not backed up in Original quality",
+                    "problem": "replacement is not backed up in Original quality",
                 }
             )
         if not album_ids(expected) <= album_ids(ext):
@@ -119,6 +135,14 @@ def audit(root=ROOT, verbose=True, selection=None):
             )
         if original[1] and current[1] != original[1]:
             problems.append({"key": key, "problem": "description changed"})
+        current_row = active_rows.get(key)
+        original_row = s.get("inventory_row", [])
+        if at(attrs(original_row), "163238866", 0) and not at(
+            attrs(current_row or []), "163238866", 0
+        ):
+            problems.append({"key": key, "problem": "favorite state missing"})
+        if at(original_row, 13) and not at(current_row, 13):
+            problems.append({"key": key, "problem": "archive state missing"})
 
     for s in states:
         stage = s.get("stage")
@@ -196,21 +220,48 @@ def audit(root=ROOT, verbose=True, selection=None):
                     "stage": s.get("stage"),
                 }
             )
+    if verify_exports:
+        expected_hashes = {
+            s["replacement_key"]: s.get("avif_sha256") or s.get("encoded_sha256")
+            for s in states + vst
+            if s.get("stage") == "trashed" and s.get("replacement_key") in active
+        }
+        keys = list(expected_hashes)
+        for start in range(0, len(keys), 20):
+            group = keys[start : start + 20]
+            with original_files(api, group) as files:
+                hashes = {digest(path) for _, path in files}
+            for key in group:
+                if not expected_hashes[key] or expected_hashes[key] not in hashes:
+                    problems.append(
+                        {"key": key, "problem": "fresh original export hash mismatch"}
+                    )
     # Items outside this migration's verified outputs also need AVIF magic validation.
     unknown = [e for e in avif if e["key"] not in proof_keys]
+
+    def avif_export_valid(keys):
+        with original_files(api, keys) as files:
+            media = [
+                (name, path)
+                for name, path in files
+                if Path(name).suffix.lower() != ".json"
+            ]
+            if len(media) != len(keys):
+                return False
+            for _, path in media:
+                with path.open("rb") as file:
+                    header = file.read(80)
+                if header[4:8] != b"ftyp" or not (
+                    b"avif" in header or b"avis" in header
+                ):
+                    return False
+            return True
+
     for start in range(0, len(unknown), 40):
         group = unknown[start : start + 40]
-        files = originals(api, [e["key"] for e in group])
-        if not all(
-            b[4:8] == b"ftyp" and (b"avif" in b[:80] or b"avis" in b[:80])
-            for _, b in files
-        ):
+        if not avif_export_valid([e["key"] for e in group]):
             for e in group:
-                fs = originals(api, [e["key"]])
-                if not all(
-                    b[4:8] == b"ftyp" and (b"avif" in b[:80] or b"avis" in b[:80])
-                    for _, b in fs
-                ):
+                if not avif_export_valid([e["key"]]):
                     bad.append(e)
     from removal import pending
 
@@ -233,6 +284,10 @@ def audit(root=ROOT, verbose=True, selection=None):
         "retained_live_photos": live,
         "video_items": videos,
         "media_complete": media_complete,
+        "fresh_replacement_exports_verified": verify_exports
+        and not any(
+            p.get("problem") == "fresh original export hash mismatch" for p in problems
+        ),
         "pending_permanent_deletions": pending_removal,
         "deletion_complete": not pending_removal,
         "complete": media_complete and not pending_removal,

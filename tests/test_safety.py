@@ -22,11 +22,13 @@ class FakeAPI:
 
 class DeletionGates(unittest.TestCase):
     def setup_case(self):
-        er = [None] * 20
+        er = [None] * 31
         er[3] = 100000
         er[4] = 3600000
         er[19] = []
         ne = er.copy()
+        ne[0] = "new"
+        ne[30] = [1, 100, 2]
         ne[2] = "new.avif"
         ne[5] = 100
         info = [["new", None, 100000, "new-dedup"]]
@@ -48,6 +50,28 @@ class DeletionGates(unittest.TestCase):
         m, s, ne = self.setup_case()
         ne[5] = 99
         self.assertFalse(m.finalize(s))
+        self.assertEqual(m.api.trashed, [])
+
+    def test_wrong_replacement_identity_never_trashes(self):
+        m, s, ne = self.setup_case()
+        ne[0] = "another-photo"
+        with self.assertRaisesRegex(RuntimeError, "identity mismatch"):
+            m.finalize(s)
+        self.assertEqual(m.api.trashed, [])
+
+    def test_storage_saver_image_never_trashes(self):
+        m, s, ne = self.setup_case()
+        ne[30][2] = 1
+        with self.assertRaisesRegex(RuntimeError, "Original quality"):
+            m.finalize(s)
+        self.assertEqual(m.api.trashed, [])
+
+    def test_wrong_cloud_dimensions_never_trashes(self):
+        m, s, ne = self.setup_case()
+        s["display_size"] = [32, 64]
+        ne[6:8] = [64, 32]
+        with self.assertRaisesRegex(RuntimeError, "dimensions mismatch"):
+            m.finalize(s)
         self.assertEqual(m.api.trashed, [])
 
     def test_changed_original_download_never_trashes(self):
@@ -149,6 +173,7 @@ class TrashRecovery(unittest.TestCase):
         from video_migration import Videos
 
         er = [None] * 31
+        er[0] = "new"
         er[30] = [1, 100, 1]
         videos = Videos.__new__(Videos)
         videos.api = FakeAPI([["new"]], [er])

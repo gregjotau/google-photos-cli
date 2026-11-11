@@ -26,16 +26,16 @@ Results depend on the input and Google processing. No private clip, account iden
 
 ## Tool behavior and recovery
 
-Use **Original quality before video optimization**. This preserves this tool's already compressed output; it does not mean uploading the large source MOV again. The client checks Google's reported quality and refuses to remove a video source if the replacement is in Storage saver.
+Use **Original quality before image or video optimization**. This preserves this tool's already compressed output; it does not mean uploading the large source MOV again. The client checks Google's reported quality and refuses to remove a video source if the replacement is in Storage saver.
 
 If earlier replacements were rewritten, first select Original quality in the web settings, then run:
 
 ```sh
-uv run google-photos-cli.py videos --repair --apply
-uv run google-photos-cli.py audit
+uv run --locked google-photos-cli.py videos --repair --apply
+uv run --locked google-photos-cli.py audit --verify-exports
 ```
 
-Filters can be used on the repair command too, for example `--year 2025`. Repair uses the retained local encoded backup, remuxes its streams without another lossy encode, journals the new upload, verifies quality/date/timezone/playback/original-export hash, removes the superseded cloud replacement, and updates the authoritative journal. The original source backup remains local. Do not delete journals to force a retry. A filtered repair does not repair videos outside its selection.
+Filters can be used on the repair command too, for example `--year 2025`. Repair uses the retained local encoded backup, remuxes its streams without another lossy encode, journals the new upload, verifies quality/date/timezone/playback/original-export hash, removes the superseded cloud replacement, and updates the authoritative journal. The original source backup remains local. Do not delete journals to force a retry. A filtered repair does not repair videos outside its selection. Add the same year/media filters to repair, audit, backup verification and permanent-removal commands. New permanent-mode conversions may finish their media repair but exit 2 while source purging awaits explicit confirmation; follow the README two-phase removal flow.
 
 The tool does not change your account setting automatically. Only restore a prior web upload preference after all replacement uploads and their verification have completed. Do not select “Convert existing photos & videos to Storage saver” for the optimized results if you want their encoded bytes preserved.
 

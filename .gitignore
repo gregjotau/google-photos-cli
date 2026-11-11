@@ -17,6 +17,8 @@
 !selection.py
 !audit_library.py
 !removal.py
+!diagnostics.py
+!docs/OPERATIONS.md
 !docs/
 !docs/STORAGE_SAVER.md
 !tests/

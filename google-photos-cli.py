@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.15"
-# dependencies = ["Pillow==13.0.0", "playwright==1.65.0"]
+# dependencies = ["Pillow==13.0.0", "playwright==1.65.0", "pillow-heif==1.8.1"]
 # ///
 """Google Photos AVIF migration using direct authenticated web requests.
 Google authentication stays inside Chrome. Start `connect`, or run `broker` and
@@ -94,7 +94,7 @@ def parser():
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=CODE,
+        default=Path(os.environ.get("GOOGLE_PHOTOS_DATA_DIR", CODE)),
         help="Separate directory for each Google account",
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -109,9 +109,14 @@ def parser():
     con = sub.add_parser(
         "connect", help="Open a persistent Chrome profile and connect API bridge"
     )
-    con.add_argument("--profile", type=Path, default=CODE / ".chrome-profile")
-    sub.add_parser(
+    con.add_argument("--profile", type=Path, help="Defaults to DATA_DIR/chrome-profile")
+    inventory_parser = sub.add_parser(
         "scan", help="Snapshot all library and archived media via paginated API"
+    )
+    inventory_parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Add new arrivals without forgetting original IDs, replacements or journals",
     )
     sub.add_parser("catalog", help="Fetch metadata in batches for snapshot")
     mig = sub.add_parser(
@@ -161,11 +166,24 @@ def parser():
         "audit", help="Rescan library and reconcile selected replacements"
     )
     filters(audit)
+    audit.add_argument(
+        "--verify-exports",
+        action="store_true",
+        help="Re-download and hash every selected replacement; slower, stronger verification",
+    )
+    backups = sub.add_parser(
+        "verify-backups", help="Verify original backup sizes and hashes offline"
+    )
+    filters(backups)
     cv = sub.add_parser("convert", help="Convert one local image without cloud changes")
     cv.add_argument("source", type=Path)
     cv.add_argument("output", type=Path)
-    cv.add_argument("--quality", type=int, default=45)
-    cv.add_argument("--speed", type=int, default=6)
+    cv.add_argument(
+        "--quality", type=int, default=45, choices=range(0, 101), metavar="0..100"
+    )
+    cv.add_argument(
+        "--speed", type=int, default=6, choices=range(0, 11), metavar="0..10"
+    )
     return p
 
 
@@ -284,18 +302,95 @@ def catalog(root, api, inventory, destination="catalog-api.json"):
     if cat["account"] != inventory["account"]:
         raise RuntimeError("Catalog account mismatch")
     keys = [r[0] for r in inventory["items"] if r[0] not in cat["items"]]
+    import time
+
+    checkpoint = time.monotonic()
+    unflushed = 0
     for start in range(0, len(keys), 40):
         group = keys[start : start + 40]
-        data = api.batch([["fDcn4b", [k, 1, None, None, 1]] for k in group])
-        for key, result in zip(group, data):
-            if not result or not result[0] or result[0][0] != key:
+        try:
+            data = api.batch([["fDcn4b", [k, 1, None, None, 1]] for k in group])
+            if len(data) != len(group):
                 raise RuntimeError(
-                    f"Metadata missing or identity mismatch for {key}; catalog remains incomplete"
+                    "Incomplete metadata batch; catalog remains incomplete"
                 )
-            cat["items"][key] = result
-        save(path, cat)
+            for key, result in zip(group, data):
+                if not result or not result[0] or result[0][0] != key:
+                    raise RuntimeError(
+                        f"Metadata missing or identity mismatch for {key}; catalog remains incomplete"
+                    )
+                cat["items"][key] = result
+        except BaseException:
+            save(path, cat)
+            raise
+        unflushed += len(group)
+        if (
+            unflushed >= 1000
+            or time.monotonic() - checkpoint >= 60
+            or start + len(group) == len(keys)
+        ):
+            save(path, cat)
+            checkpoint = time.monotonic()
+            unflushed = 0
         print(f"Metadata: {len(cat['items'])} / {len(inventory['items'])}", flush=True)
     return cat
+
+
+def append_inventory(root, api):
+    from migration import save
+
+    path = root / "inventory-api.json"
+    original = json.loads(path.read_text())
+    if not original.get("complete"):
+        raise RuntimeError("Finish the initial scan before appending arrivals")
+    excluded = {r[0] for r in original["items"]}
+    for folder in ("work-api", "work-video"):
+        for journal in (root / folder).glob("*/state.json"):
+            state = json.loads(journal.read_text())
+            if state.get("account") != original["account"]:
+                raise RuntimeError("Append journal account mismatch")
+            if state.get("original_key") != journal.parent.name:
+                raise RuntimeError("Append journal identity mismatch")
+            if state.get("stage") not in (
+                "trashed",
+                "already_avif",
+                "video",
+                "already_efficient",
+                "live_photo_unchanged",
+            ):
+                raise RuntimeError(
+                    "Finish or reconcile pending conversions before scan --append"
+                )
+            repair_path = journal.with_name("quality-repair.json")
+            if (
+                repair_path.exists()
+                and json.loads(repair_path.read_text()).get("stage") != "trashed"
+            ):
+                raise RuntimeError("Finish pending video repair before scan --append")
+            if state.get("replacement_key"):
+                excluded.add(state["replacement_key"])
+            excluded.update(
+                item["key"] for item in state.get("superseded_replacements", [])
+            )
+    if api.call({"op": "hello"})["account"] != original["account"]:
+        raise RuntimeError("Append connected account mismatch")
+    fresh = scan(root, api, "append-inventory.json")
+    if fresh["account"] != original["account"] or not fresh["complete"]:
+        raise RuntimeError("Append scan account/completeness mismatch")
+    additions = [r for r in fresh["items"] if r[0] not in excluded]
+    original["items"].extend(additions)
+    original["last_appended_items"] = len(additions)
+    save(path, original)
+    print(
+        json.dumps(
+            {
+                "appended_items": len(additions),
+                "original_snapshot_items": len(original["items"]),
+                "cloud_changes": False,
+            }
+        )
+    )
+    return original
 
 
 def status(root):
@@ -389,50 +484,85 @@ async def connect(profile):
                         c["url"] + "/bootstrap?key=" + c["key"], timeout=0.2
                     ) as r:
                         if r.status == 200:
+                            active = True
                             break
                 except Exception:
                     pass
             await asyncio.sleep(0.1)
+        if not active:
+            broker.terminate()
+            broker.wait(timeout=5)
+            raise RuntimeError(
+                "Local broker did not become ready. Check port 8765 and restart the connection."
+            )
     c = json.loads(config.read_text())
     script = (CODE / "api-bridge.js").read_text().replace("__BRIDGE_KEY__", c["key"])
-    async with async_playwright() as pw:
-        context = await pw.chromium.launch_persistent_context(
-            str(profile.resolve()), channel="chrome", headless=False
-        )
-        try:
-            page = await context.new_page()
-            await page.goto("https://photos.google.com/")
-            print(
-                "Sign in to the intended Google account in Chrome. Allow the local-device connection when Chrome asks.",
-                flush=True,
+    try:
+        async with async_playwright() as pw:
+            context = await pw.chromium.launch_persistent_context(
+                str(profile.resolve()), channel="chrome", headless=False
             )
-            while not await page.evaluate("!!window.WIZ_global_data?.SNlM0e"):
-                await asyncio.sleep(1)
-            # No DOM selectors for Photos operations; direct authenticated requests only.
-            # Long-lived worker is started without awaiting its polling loop.
-            script = script.replace(
-                "(async()=>{", "window.avifBridgeWorker = (async()=>{", 1
-            )
-            await page.evaluate("() => { " + script + "; return true; }")
-            print(
-                "Connected. Run scan, catalog, migrate and audit in another terminal. Keep this window open.",
-                flush=True,
-            )
-            while not page.is_closed():
-                await asyncio.sleep(1)
-        finally:
-            await context.close()
-            if broker:
-                broker.terminate()
+            try:
+                page = await context.new_page()
+                await page.goto("https://photos.google.com/")
+                print(
+                    "Sign in to the intended Google account. Allow the local-device connection when Chrome asks. Keep this terminal and tab open.",
+                    flush=True,
+                )
+                script = script.replace(
+                    "(async()=>{", "window.avifBridgeWorker = (async()=>{", 1
+                )
+                while not page.is_closed():
+                    try:
+                        ready = await page.evaluate(
+                            "location.hostname === 'photos.google.com' && !!window.WIZ_global_data?.SNlM0e && !window.avifBridgeV3"
+                        )
+                        if ready:
+                            await page.evaluate(
+                                "() => { " + script + "; return true; }"
+                            )
+                            print(
+                                "Bridge attached. Run plan/run/audit in another terminal; account-bound tasks stay scoped after navigation.",
+                                flush=True,
+                            )
+                    except Exception as error:
+                        if page.is_closed():
+                            break
+                        # Navigation briefly destroys the page context. Reattach only
+                        # after the normal signed-in page becomes ready again.
+                        print(
+                            f"Waiting for the Photos tab: {type(error).__name__}",
+                            flush=True,
+                        )
+                    await asyncio.sleep(2)
+            finally:
+                await context.close()
+    finally:
+        if broker:
+            broker.terminate()
+            try:
+                broker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                broker.kill()
+                broker.wait()
 
 
 def main():
     p = parser()
     args = p.parse_args()
+    os.umask(0o077)
     root = args.data_dir.resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     selection = None
-    if args.command in ("run", "migrate", "videos", "plan", "audit", "purge-originals"):
+    if args.command in (
+        "run",
+        "migrate",
+        "videos",
+        "plan",
+        "audit",
+        "purge-originals",
+        "verify-backups",
+    ):
         try:
             selection = from_args(args)
         except ValueError as e:
@@ -445,10 +575,15 @@ def main():
     os.environ["GOOGLE_PHOTOS_DATA_DIR"] = str(root)
     # One modifying workflow per account directory, including combined runs.
     lock = None
-    if (
-        args.command in ("run", "migrate", "videos", "purge-originals")
-        and args.apply
-        and not args.dry_run
+    if args.command in (
+        "scan",
+        "catalog",
+        "audit",
+        "plan",
+        "run",
+        "migrate",
+        "videos",
+        "purge-originals",
     ):
         import fcntl
 
@@ -505,17 +640,14 @@ def main():
             f"Bootstrap saved to {dest}. Run its contents once in the signed-in Photos DevTools console."
         )
     elif args.command == "connect":
-        asyncio.run(connect(args.profile))
+        asyncio.run(connect(args.profile or root / "chrome-profile"))
     elif args.command == "doctor":
-        from converter import run
+        from diagnostics import doctor
 
-        print(run("avifenc", "--version"))
-        print("ExifTool", run("exiftool", "-ver").strip())
-        import PIL
-
-        print("Pillow", PIL.__version__)
-        print(run("ffmpeg", "-version").splitlines()[0])
-        print(run("ffprobe", "-version").splitlines()[0])
+        result = doctor(root)
+        print(json.dumps(result, indent=2))
+        if not result["ready"]:
+            raise SystemExit(1)
     elif args.command == "convert":
         from converter import convert
 
@@ -528,6 +660,13 @@ def main():
         print(json.dumps(status(root), indent=2))
     elif args.command == "report":
         print(json.dumps(savings_report(root), indent=2))
+    elif args.command == "verify-backups":
+        from removal import verify_backups
+
+        result = verify_backups(root, selection)
+        print(json.dumps(result, indent=2))
+        if not result["complete"]:
+            raise SystemExit(2)
     elif args.command == "purge-originals":
         from removal import create_plan, execute, summary, downgrade_to_trash
 
@@ -579,12 +718,21 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             image_job = pool.submit(images)
             video_job = pool.submit(videos)
-            image_job.result()
-            video_job.result()
-        images()
-        videos()
+            outcomes = [image_job.result(), video_job.result()]
+        if any(errors or waiting for errors, waiting in outcomes):
+            raise SystemExit(2)
         complete_workflow(root, selection, args)
     elif args.command == "scan":
+        if args.append:
+            append_inventory(root, API())
+            return
+        if any(
+            next((root / folder).glob("*/state.json"), None)
+            for folder in ("work-api", "work-video")
+        ):
+            raise SystemExit(
+                "Refusing to overwrite an active migration snapshot. Reuse it or use scan --append for new arrivals."
+            )
         scan(root, API())
     elif args.command == "catalog":
         catalog(root, API(), json.loads((root / "inventory-api.json").read_text()))
@@ -599,7 +747,9 @@ def main():
     elif args.command == "audit":
         from audit_library import audit
 
-        if not audit(root, selection=selection)["complete"]:
+        if not audit(root, selection=selection, verify_exports=args.verify_exports)[
+            "complete"
+        ]:
             raise SystemExit(2)
 
 

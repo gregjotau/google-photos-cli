@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Local-only broker. Google authentication remains in the signed-in Photos page."""
 
-import http.server, json, secrets, threading, queue
+import http.server, json, secrets, threading, queue, time
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).resolve().parent
 KEY = secrets.token_urlsafe(24)
-pending = queue.Queue()
+pending = queue.Queue(maxsize=256)
 results = {}
 lock = threading.Lock()
 available = threading.Condition(lock)
@@ -49,10 +49,16 @@ class H(http.server.BaseHTTPRequestHandler):
             code = (ROOT / "api-bridge.js").read_text().replace("__BRIDGE_KEY__", KEY)
             return self.reply(code, ctype="text/javascript")
         if path == "/next":
-            try:
-                task = pending.get(timeout=20)
-            except queue.Empty:
-                task = None
+            task = None
+            end = time.monotonic() + 20
+            while time.monotonic() < end:
+                try:
+                    candidate = pending.get(timeout=max(0.01, end - time.monotonic()))
+                except queue.Empty:
+                    break
+                if candidate.get("expires_at", 0) > time.time():
+                    task = candidate
+                    break
             return self.reply(task)
         if path.startswith("/result/"):
             taskid = path.rsplit("/", 1)[1]
@@ -67,11 +73,25 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.auth():
             return self.reply({"error": "unauthorized"}, 403)
-        data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if not 0 < size <= 64 * 1024 * 1024:
+                return self.reply({"error": "request size outside bounds"}, 413)
+            data = json.loads(self.rfile.read(size))
+            if not isinstance(data, dict):
+                raise ValueError("Expected JSON object")
+        except (ValueError, json.JSONDecodeError):
+            return self.reply({"error": "invalid JSON request"}, 400)
         if urlparse(self.path).path == "/enqueue":
             taskid = secrets.token_hex(12)
             data["id"] = taskid
-            pending.put(data)
+            data.setdefault("expires_at", time.time() + 180)
+            try:
+                pending.put_nowait(data)
+            except queue.Full:
+                return self.reply(
+                    {"error": "bridge queue full; reconnect and reconcile"}, 503
+                )
             return self.reply({"id": taskid})
         if urlparse(self.path).path == "/result":
             with available:

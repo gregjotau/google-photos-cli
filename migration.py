@@ -2,8 +2,8 @@
 
 import concurrent.futures, hashlib, json, time, threading
 from pathlib import Path
-from photos_api import API, ROOT, at, upload, sha1_b64, originals
-from converter import convert, digest
+from photos_api import API, ROOT, at, upload, sha1_b64, originals, original_files
+from converter import convert, digest, atomic_json, atomic_bytes
 from selection import Selection
 
 WORK = ROOT / "work-api"
@@ -11,9 +11,7 @@ WORK = ROOT / "work-api"
 
 def save(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False))
-    tmp.replace(path)
+    atomic_json(path, data)
 
 
 def sha(data):
@@ -96,6 +94,8 @@ class Migration:
         state = self.state(key)
         if state.get("account") != self.account:
             raise RuntimeError("Journal account mismatch")
+        if state.get("original_key") != key:
+            raise RuntimeError("Journal source identity does not match selected item")
         if state.get("stage") in ("trashed", "already_avif", "video"):
             return
         live = "146008172" in attrs(row)
@@ -135,6 +135,18 @@ class Migration:
         output = folder / (
             Path(filename).stem + ("-still-avif.avif" if live else "-avif.avif")
         )
+        if state.get("stage") == "committing" and (
+            not source.exists() or not output.exists()
+        ):
+            raise RuntimeError(
+                "Ambiguous commit requires its original backup and encoded output; restore missing files before resuming"
+            )
+        if (
+            source.exists()
+            and state.get("original_sha256")
+            and digest(source) != state["original_sha256"]
+        ):
+            raise RuntimeError("Original backup changed; refusing to resume upload")
         if not state.get("original_info"):
             info = self.api.info(key)
             if at(info, 0, 0) != key:
@@ -179,9 +191,7 @@ class Migration:
                     raise RuntimeError("Download did not return image")
                 if er[5] and len(response["body"]) != er[5]:
                     raise RuntimeError("Original size mismatch; possible processing")
-                tmp = source.with_suffix(source.suffix + ".part")
-                tmp.write_bytes(response["body"])
-                tmp.replace(source)
+                atomic_bytes(source, response["body"])
             except Exception:
                 files = originals(self.api, [key])
                 stills = [
@@ -191,7 +201,7 @@ class Migration:
                 ]
                 if len(stills) != 1:
                     raise RuntimeError("Unexpected original export contents")
-                source.write_bytes(stills[0][1])
+                atomic_bytes(source, stills[0][1])
                 clips = [
                     (n, b)
                     for n, b in files
@@ -201,7 +211,7 @@ class Migration:
                     motion_path = folder / (
                         "original-motion" + Path(clips[0][0]).suffix.lower()
                     )
-                    motion_path.write_bytes(clips[0][1])
+                    atomic_bytes(motion_path, clips[0][1])
                     self.write(
                         state,
                         motion_source=str(motion_path),
@@ -271,9 +281,7 @@ class Migration:
                 if movie
                 else source
             )
-            tmp = target.with_suffix(target.suffix + ".part")
-            tmp.write_bytes(data)
-            tmp.replace(target)
+            atomic_bytes(target, data)
             manifest.append(
                 {
                     "path": str(target),
@@ -315,9 +323,12 @@ class Migration:
     def commit(self, state, future):
         result = future.result()
         output = Path(state["output"])
+        ambiguous = state.get("stage") == "committing"
+        if state.get("avif_sha256") and state["avif_sha256"] != result["avif_sha256"]:
+            raise RuntimeError("Encoded output changed since journal; upload refused")
         self.write(
             state,
-            stage="converted",
+            stage="committing" if ambiguous else "converted",
             avif_sha256=result["avif_sha256"],
             avif_bytes=output.stat().st_size,
             sha1=sha1_b64(output.read_bytes()),
@@ -327,7 +338,13 @@ class Migration:
         def intent(**kw):
             self.write(state, **kw)
 
-        key = upload(self.api, output, state["original_ext"][0][3], intent)
+        key = upload(
+            self.api,
+            output,
+            state["original_ext"][0][3],
+            intent,
+            reconcile_only=ambiguous,
+        )
         if key == state["original_key"]:
             raise RuntimeError("Replacement equals original")
         self.write(
@@ -365,13 +382,21 @@ class Migration:
         info, newext = values
         if not info or not newext:
             return False
+        if at(info, 0, 0) != key or at(newext, 0, 0) != key:
+            raise RuntimeError("Replacement metadata identity mismatch")
         if live and "146008172" in attrs(info[0]):
             raise RuntimeError(
                 "Replacement is still a Live Photo; retain the combined original"
             )
         ne = newext[0]
+        if at(newext, 0, 30, 2) != 2:
+            raise RuntimeError(
+                "Image replacement must use Original quality; retain source and see README recovery notes"
+            )
         if not ne[2].lower().endswith(".avif") or ne[5] != state["avif_bytes"]:
             return False
+        if state.get("display_size") and list(ne[6:8]) != list(state["display_size"]):
+            raise RuntimeError("Cloud image dimensions mismatch; retain source")
         # Capture date and timezone are cloud metadata, independently verified.
         if ne[3:5] != er[3:5]:
             if state.get("date_repair_attempted"):
@@ -464,8 +489,10 @@ class Migration:
         for offset in range(0, len(eligible), 30):
             group = eligible[offset : offset + 30]
             try:
-                files = originals(self.api, [s["replacement_key"] for s in group])
-                hashes = {sha(content) for _, content in files}
+                with original_files(
+                    self.api, [s["replacement_key"] for s in group]
+                ) as files:
+                    hashes = {digest(path) for _, path in files}
                 for s in group:
                     if s["avif_sha256"] in hashes:
                         self.write(s, download_verified_sha256=s["avif_sha256"])

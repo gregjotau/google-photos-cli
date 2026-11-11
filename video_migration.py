@@ -2,7 +2,8 @@
 
 import concurrent.futures, hashlib, json, time, threading
 from pathlib import Path
-from photos_api import API, ROOT, at, originals, upload
+from photos_api import API, ROOT, at, original_files, upload
+from converter import backup_file
 from migration import save, attrs, is_video, album_ids
 from video_codec import encode, probe
 from selection import Selection
@@ -52,6 +53,12 @@ class Videos:
             if statefile.exists()
             else {"original_key": key, "account": self.account}
         )
+        if s.get("account") != self.account:
+            raise RuntimeError("Video journal account mismatch")
+        if s.get("original_key") != key:
+            raise RuntimeError(
+                "Video journal source identity does not match selected item"
+            )
         if s.get("stage") in ("trashed", "already_efficient"):
             return
         if s.get("replacement_key"):
@@ -64,6 +71,12 @@ class Videos:
         er = e[0]
         source = f / ("original" + Path(er[2]).suffix.lower())
         target = f / (Path(er[2]).stem + "-hevc.mp4")
+        if s.get("stage") == "committing" and (
+            not source.exists() or not target.exists()
+        ):
+            raise RuntimeError(
+                "Ambiguous video commit requires its retained backup and output; restore missing files before resuming"
+            )
         if not s.get("original_ext"):
             self.write(
                 s,
@@ -76,16 +89,30 @@ class Videos:
                 filename=er[2],
             )
         if not source.exists():
-            data = originals(self.api, [key])
-            if len(data) != 1:
-                raise RuntimeError("Unexpected video export")
-            source.write_bytes(data[0][1])
+            with original_files(self.api, [key]) as files:
+                data = [(n, p) for n, p in files if Path(n).suffix.lower() != ".json"]
+                if len(data) != 1:
+                    raise RuntimeError("Unexpected video export")
+                backup_file(data[0][1], source)
             self.write(
                 s,
                 stage="downloaded",
                 original_sha256=sha(source),
                 original_backup_bytes=source.stat().st_size,
             )
+        if not s.get("original_sha256"):
+            # An atomic file can survive a crash just before its journal update.
+            if source.stat().st_size != er[5]:
+                raise RuntimeError(
+                    "Unjournaled video backup size mismatch; retain source"
+                )
+            self.write(
+                s,
+                original_sha256=sha(source),
+                original_backup_bytes=source.stat().st_size,
+            )
+        if sha(source) != s["original_sha256"]:
+            raise RuntimeError("Video original backup changed; upload refused")
         if not target.exists():
             self.write(s, conversion=encode(source, target, er[3], codec="hevc"))
         if target.stat().st_size >= er[5]:
@@ -100,13 +127,25 @@ class Videos:
         def intent(**kw):
             self.write(s, **kw)
 
-        new = upload(self.api, target, er[3], intent)
+        encoded_sha = sha(target)
+        if s.get("encoded_sha256") and s["encoded_sha256"] != encoded_sha:
+            raise RuntimeError("Encoded video changed since journal; upload refused")
+        self.write(s, encoded_sha256=encoded_sha, encoded_bytes=target.stat().st_size)
+        new = upload(
+            self.api,
+            target,
+            er[3],
+            intent,
+            reconcile_only=s.get("stage") == "committing",
+        )
+        if new == key:
+            raise RuntimeError("Video replacement equals original")
         self.write(
             s,
             stage="uploaded",
             replacement_key=new,
             encoded_bytes=target.stat().st_size,
-            encoded_sha256=sha(target),
+            encoded_sha256=encoded_sha,
             uploaded_at=time.time(),
         )
         with self.lock:
@@ -146,6 +185,8 @@ class Videos:
         )
         if not info or not ext:
             return False
+        if at(info, 0, 0) != key or at(ext, 0, 0) != key:
+            raise RuntimeError("Video replacement metadata identity mismatch")
         quality = at(ext, 0, 30, 2)
         if quality is None:
             return False
@@ -169,11 +210,9 @@ class Videos:
             if self.api.extended(key)[0][3:5] != er[3:5]:
                 raise RuntimeError("Video capture date/zone mismatch")
         if s.get("download_verified_sha256") != s["encoded_sha256"]:
-            files = originals(self.api, [key])
-            if s["encoded_sha256"] not in {
-                hashlib.sha256(b).hexdigest() for _, b in files
-            }:
-                return False
+            with original_files(self.api, [key]) as files:
+                if s["encoded_sha256"] not in {sha(path) for _, path in files}:
+                    return False
             self.write(s, download_verified_sha256=s["encoded_sha256"])
         missing = album_ids(s["original_ext"]) - album_ids(ext)
         for album in er[19] or []:
@@ -191,6 +230,14 @@ class Videos:
             self.api.rpc("Ftfh0", [[[None, info[0][3]]], [1]])
         if at(s["inventory_row"], 13):
             self.api.rpc("w7TP3c", [[[None, [1], [None, info[0][3]]]], None, 1])
+        if at(s["inventory_row"], -1, "163238866", 0) or at(s["inventory_row"], 13):
+            check = self.api.info(key)
+            if at(s["inventory_row"], -1, "163238866", 0) and not at(
+                attrs(check[0]), "163238866", 0
+            ):
+                raise RuntimeError("Video favorite mismatch")
+            if at(s["inventory_row"], 13) and not at(check, 0, 13):
+                raise RuntimeError("Video archive mismatch")
         if sha(s["source"]) != s["original_sha256"]:
             raise RuntimeError("Video original backup changed")
         self.write(

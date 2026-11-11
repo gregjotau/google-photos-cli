@@ -26,7 +26,16 @@ def records(root, selection):
             / "state.json"
         )
         if path.exists():
-            yield path, json.loads(path.read_text()), inv["account"]
+            state = json.loads(path.read_text())
+            if state.get("original_key") != row[0]:
+                raise RuntimeError(
+                    "Journal source identity differs from selected inventory item"
+                )
+            if state.get("original_ext") and at(state["original_ext"], 0, 0) != row[0]:
+                raise RuntimeError(
+                    "Original metadata identity differs from selected inventory item"
+                )
+            yield path, state, inv["account"]
 
 
 def local_backup(state):
@@ -66,6 +75,30 @@ def pending(root, selection):
         and s.get("stage") == "trashed"
         and not s.get("original_deleted_permanently")
     ]
+
+
+def verify_backups(root, selection):
+    checked = 0
+    total = 0
+    failures = []
+    for _, s, account in records(root, selection):
+        if not s.get("source"):
+            continue
+        try:
+            if s.get("account") != account:
+                raise RuntimeError("Backup journal account mismatch")
+            parts = local_backup(s)
+            total += sum(p["bytes"] for p in parts)
+            checked += 1
+        except (OSError, RuntimeError) as error:
+            failures.append({"key": s["original_key"], "error": str(error)})
+    return {
+        "complete": not failures,
+        "checked_originals": checked,
+        "backup_bytes": total,
+        "failures": failures,
+        "cloud_requests": 0,
+    }
 
 
 def downgrade_to_trash(root, selection):
@@ -187,9 +220,16 @@ def execute(root, selection, *, confirmed=False, api=None):
                 or at(ext, 0, 5) != expected_size
                 or at(ext, 0, 3) != er[3]
                 or at(ext, 0, 4) != er[4]
+                or at(ext, 0, 2) != Path(s["output"]).name
             ):
                 raise RuntimeError(
                     "Replacement identity/quality/size/date changed; permanent deletion refused"
+                )
+            if s.get("display_size") and list(at(ext, 0, default=[])[6:8]) != list(
+                s["display_size"]
+            ):
+                raise RuntimeError(
+                    "Replacement dimensions changed; permanent deletion refused"
                 )
             if not album_ids(s["original_ext"]) <= album_ids(ext) or (
                 er[1] and at(ext, 0, 1) != er[1]

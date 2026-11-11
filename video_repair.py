@@ -31,6 +31,8 @@ class VideoRepair(Videos):
         source = json.loads(path.read_text())
         if source.get("account") != self.account:
             raise RuntimeError("Video repair journal account mismatch")
+        if source.get("original_key") != parent:
+            raise RuntimeError("Video repair source identity mismatch")
         old = source.get("replacement_key")
         if not old:
             return
@@ -43,6 +45,11 @@ class VideoRepair(Videos):
         repair_path = WORK / parent / "quality-repair.json"
         if repair_path.exists():
             repair = json.loads(repair_path.read_text())
+            if (
+                repair.get("account") != self.account
+                or repair.get("_repair_parent") != parent
+            ):
+                raise RuntimeError("Repair account or parent identity mismatch")
             if repair.get("original_key") != old:
                 raise RuntimeError(
                     "Repair source changed; retain all candidates for reconciliation"
@@ -79,6 +86,7 @@ class VideoRepair(Videos):
                 repair["output"],
                 source["original_ext"][0][3],
                 lambda **kw: self.write(repair, **kw),
+                reconcile_only=repair.get("stage") == "committing",
             )
             if key == old:
                 raise RuntimeError("Repair upload did not create a distinct item")

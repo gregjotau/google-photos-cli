@@ -1,4 +1,5 @@
-import json, subprocess, tempfile, hashlib
+import json, subprocess, tempfile
+from converter import digest
 from pathlib import Path
 from fractions import Fraction
 from datetime import datetime, timezone
@@ -106,9 +107,17 @@ def encode(source, target, timestamp, crf=35, preset=8, threads=4, codec="hevc")
         raise RuntimeError("Video output already exists")
     before = probe(source)
     v = next(s for s in before["streams"] if s["codec_type"] == "video")
-    fps = float(Fraction(v.get("avg_frame_rate", "30/1") or "30/1"))
+    fps = None
+    for field in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            candidate = float(Fraction(v.get(field) or "0"))
+            if candidate > 0:
+                fps = candidate
+                break
+        except (ValueError, ZeroDivisionError):
+            pass
     scale = "scale=w='min(iw,if(gte(iw,ih),1920,1080))':h='min(ih,if(gte(iw,ih),1080,1920))':force_original_aspect_ratio=decrease:force_divisible_by=2"
-    if fps > 30.01:
+    if fps is None or fps > 30.01:
         scale += ",fps=30"
     date = (
         datetime.fromtimestamp(timestamp / 1000, timezone.utc)
@@ -170,18 +179,33 @@ def encode(source, target, timestamp, crf=35, preset=8, threads=4, codec="hevc")
             raise RuntimeError("Unexpected video codec")
         dur = float(before["format"]["duration"])
         ndur = float(after["format"]["duration"])
-        if abs(dur - ndur) > max(0.25, 1 / max(fps, 1)):
+        if abs(dur - ndur) > max(0.25, 1 / max(fps or 30, 1)):
             raise RuntimeError("Encoded duration mismatch")
         if any(s["codec_type"] == "audio" for s in before["streams"]) and not any(
             s["codec_type"] == "audio" for s in after["streams"]
         ):
             raise RuntimeError("Audio lost")
-        run(["ffmpeg", "-v", "error", "-nostdin", "-i", pending, "-f", "null", "-"])
+        run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-xerror",
+                "-err_detect",
+                "explode",
+                "-nostdin",
+                "-i",
+                pending,
+                "-f",
+                "null",
+                "-",
+            ]
+        )
         pending.replace(target)
     return {
         "original_bytes": source.stat().st_size,
         "encoded_bytes": target.stat().st_size,
-        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        "sha256": digest(target),
         "duration": ndur,
         "width": nv["width"],
         "height": nv["height"],

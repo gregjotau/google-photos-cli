@@ -9,16 +9,16 @@ Cloud writes are opt-in through `--apply`; preview is the default. Respect a use
 ## Safety invariants
 
 - Bind inventory, metadata, and journals to the connected account; reject mismatches.
-- Keep downloaded originals locally. Commit output files and journals atomically.
-- Record intent before remote commit and reconcile interruptions by content hash. Never blindly repeat an ambiguous upload commit.
+- Keep downloaded originals locally. Commit journals and backups atomically with file/directory sync. Never accept partial original downloads after an interruption.
+- Record intent before remote commit and reconcile interruptions by content hash. Never blindly repeat an ambiguous upload commit. A committing journal must use upload(reconcile_only=True): if hash lookup has no match, stop and retry lookup later without uploading again.
 - Default Live/Motion Photos to one AVIF still, backing up ALL original still/motion components locally before removal. --live-photos keep preserves the combined cloud original; never create two cloud assets from one. Exclude Locked Folder.
 - Require the replacement's expected filename, stored size, cloud capture timestamp/timezone, and byte-identical SHA-256 true-original export before trashing its source.
 - Use `pLFTfd` original export. Other download endpoints can return compatibility JPEGs/transcoded video, including for canonical AVIF/MP4 uploads. Processing delays must cause a wait, not a weakened check.
 - Preserve reported writable album memberships and descriptions; retain favorites/archive flags. Never alter album access lists.
 - Videos must fully decode locally, retain duration/audio presence, expose cloud playback variants, and be smaller before source removal.
-- Require Google's Original-quality flag before removing a video source. Storage saver can asynchronously replace an initially byte-identical HEVC upload with VP9 and different bytes/size. See `docs/STORAGE_SAVER.md`. Do not automatically change account settings without user authorization; record and restore the previous preference when a user authorizes a temporary change. `videos --repair --apply` remuxes retained encoded streams, verifies the new Original-quality upload, removes the superseded candidate, and updates the original authoritative journal without changing its baseline size.
+- Require Google's Original-quality flag before removing any image or video source. Storage saver can asynchronously replace an initially byte-identical HEVC upload with VP9 and different bytes/size. See `docs/STORAGE_SAVER.md`. Do not automatically change account settings without user authorization; record and restore the previous preference when a user authorizes a temporary change. `videos --repair --apply` remuxes retained encoded streams, verifies the new Original-quality upload, removes the superseded candidate, and updates the original authoritative journal without changing its baseline size.
 - Read back Trash after moving originals; permanent removal must match authoritative Trash media IDs and deletion keys against original metadata, then confirm absence. A successful HTTP response is insufficient.
-- Fresh audits must reconcile every expected original/replacement and distinguish a filtered selection from the whole library. Never claim complete library migration based on a sample or cached inventory alone.
+- Use verify-backups for offline original checks and audit --verify-exports for a fresh re-download of selected replacements. Fresh audits must reconcile every expected original/replacement and distinguish a filtered selection from the whole library. Never claim complete library migration based on a sample or cached inventory alone. Use scan --append for new arrivals only after reconciling pending conversions; never overwrite the original snapshot or treat known replacements as new sources.
 
 ## Architecture and performance
 

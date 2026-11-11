@@ -81,6 +81,7 @@ def data(root, mode="permanent"):
     )
     new = json.loads(json.dumps(ext))
     new[0][0] = "new"
+    new[0][2] = "new.avif"
     new[0].extend([None] * (31 - len(new[0])))
     new[0][11] = "new-dedup"
     new[0][30] = [1, 4, 2]
@@ -174,6 +175,15 @@ class PermanentRemoval(unittest.TestCase):
             self.assertEqual(
                 len(create_plan(root, Selection(years=[2026]))["items"]), 1
             )
+
+    def test_journal_cannot_redirect_a_selected_item_to_another_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state, _, path = data(root)
+            state["original_key"] = "out-of-scope"
+            path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(RuntimeError, "identity differs"):
+                create_plan(root, Selection())
 
     def test_low_level_api_requires_confirmation_and_never_empties_trash(self):
         api = API.__new__(API)

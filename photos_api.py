@@ -1,6 +1,7 @@
 """Direct web RPC transport via local broker; browser retains authentication."""
 
 import base64, json, time, urllib.request, threading, os
+from contextlib import contextmanager
 from pathlib import Path
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -23,22 +24,25 @@ class API:
         self.authuser = 0
         self.account = None
 
-    def local(self, path, data=None):
+    def local(self, path, data=None, timeout=30):
         req = urllib.request.Request(
             self.config["url"] + path + "?key=" + self.config["key"],
             data=json.dumps(data).encode() if data is not None else None,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
 
     def call(self, task, timeout=180):
+        task = dict(task, expires_at=time.time() + timeout)
         if self.account:
             task["account"] = self.account
         taskid = self.local("/enqueue", task)["id"]
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            result = self.local("/result/" + taskid)
+            result = self.local(
+                "/result/" + taskid, timeout=min(30, max(0.1, end - time.monotonic()))
+            )
             if result:
                 if not result.get("ok"):
                     raise RuntimeError(result.get("error"))
@@ -165,7 +169,9 @@ def sha1_b64(data):
     return base64.b64encode(hashlib.sha1(data).digest()).decode()
 
 
-def upload(api, path, modified_ms, write_ahead=lambda **kw: None):
+def upload(
+    api, path, modified_ms, write_ahead=lambda **kw: None, *, reconcile_only=False
+):
     """Hash lookup reconciles a commit after interruption; never blindly repeat mdpdU."""
     import re
     from urllib.parse import urlparse
@@ -182,6 +188,12 @@ def upload(api, path, modified_ms, write_ahead=lambda **kw: None):
     for entry in at(matches, 0, default=[]) or []:
         if entry[0] == sha and at(entry, 1, 0):
             return entry[1][0]
+    if reconcile_only:
+        raise RuntimeError(
+            "Previous upload commit is ambiguous and its hash is not visible yet. "
+            "Reconnect and rerun later; no new upload or commit was attempted. "
+            "Keep the committing journal for reconciliation."
+        )
     size = path.stat().st_size
     n = size
     var = []
@@ -260,18 +272,22 @@ def upload(api, path, modified_ms, write_ahead=lambda **kw: None):
     return key
 
 
-def originals(api, keys):
+@contextmanager
+def original_files(api, keys):
     """True originals export. Legacy yCLA7/dnv2s may export compatibility JPEGs.
     pLFTfd returns a short-lived Google-signed ZIP URL; no cookies leave Chrome.
     """
-    import tempfile, zipfile, urllib.parse
+    import tempfile, zipfile, urllib.parse, shutil
 
     result = api.rpc("pLFTfd", [keys, None, None])
     url = at(result, 0)
     u = urllib.parse.urlparse(url)
     if u.scheme != "https" or u.hostname != "video-downloads.googleusercontent.com":
         raise RuntimeError("Unexpected original-export host")
-    with urllib.request.urlopen(url, timeout=180) as response:
+    with (
+        tempfile.TemporaryDirectory(prefix="photos-export-") as directory,
+        urllib.request.urlopen(url, timeout=180) as response,
+    ):
         if response.status != 200:
             raise RuntimeError("Original-export HTTP " + str(response.status))
         with tempfile.TemporaryFile() as file:
@@ -283,10 +299,25 @@ def originals(api, keys):
             file.seek(0)
             if not zipfile.is_zipfile(file):
                 file.seek(0)
-                return [("original", file.read())]
-            with zipfile.ZipFile(file) as archive:
-                return [
-                    (entry.filename, archive.read(entry))
-                    for entry in archive.infolist()
-                    if not entry.is_dir()
-                ]
+                target = Path(directory) / "original"
+                with target.open("wb") as output:
+                    shutil.copyfileobj(file, output, 1024 * 1024)
+                yield [("original", target)]
+            else:
+                with zipfile.ZipFile(file) as archive:
+                    paths = []
+                    for index, entry in enumerate(archive.infolist()):
+                        if entry.is_dir():
+                            continue
+                        # Generated local names: never extract untrusted ZIP paths.
+                        target = Path(directory) / str(index)
+                        with archive.open(entry) as source, target.open("wb") as output:
+                            shutil.copyfileobj(source, output, 1024 * 1024)
+                        paths.append((entry.filename, target))
+                    yield paths
+
+
+def originals(api, keys):
+    """Compatibility wrapper for small image exports; videos use disk streaming."""
+    with original_files(api, keys) as files:
+        return [(name, path.read_bytes()) for name, path in files]

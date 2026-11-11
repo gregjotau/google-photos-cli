@@ -1,0 +1,112 @@
+# Operating and recovering a migration
+
+This client uses an undocumented Google Photos web protocol. The tested full-library migration was on one macOS account. Linux codec CI is useful coverage, not proof that Google sign-in and migration work on every Linux installation. Windows is unsupported. Login, passkeys, MFA, CAPTCHAs, operating-system restrictions and irreversible-action confirmations can still require the account owner.
+
+## Choose a scope and a recovery policy
+
+| Choice | Behavior |
+| --- | --- |
+| `--year 2023` | Capture year with the recorded UTC offset; keep it on every scoped command |
+| `--limit 5` | Stable first five matches, including completed/kept items; rerunning does not advance to the next five |
+| Default Live Photo policy | One AVIF still; original still and motion components remain locally backed up |
+| `--live-photos keep` | Leave combined Live/Motion Photos unchanged in Google Photos |
+| Default permanent intent | New verified sources wait in Trash until `--confirm-permanent-delete` is supplied |
+| `--delete-mode trash` | Retain recoverable Google Trash; local backups remain mandatory |
+
+Do not permanently remove cloud originals until you have checked that the backups are readable, complete and on a disk you intend to keep. File integrity is not visual quality: inspect the smoke-test images and videos yourself. The settings are intentionally lossy. Keep specialized/HDR/RAW assets outside the conversion scope if their original presentation matters.
+
+Google says Trash does not count toward account storage. Permanent deletion removes recovery; it is not an extra quota-saving step. The CLI never empties unrelated Trash, upgrades old completed Trash-mode journals, or touches Locked Folder.
+
+## A complete 2023 smoke test and migration
+
+Install prerequisites and clone the repository as described in README. Use a disk with room for all originals, encoded outputs, temporary PNGs, and temporary video exports. A large video may temporarily occupy space as a downloaded ZIP, extracted source and local backup; streaming reduces RAM requirements, not disk requirements.
+
+Terminal 1:
+
+```sh
+cd ~/google-photos-cli
+export GOOGLE_PHOTOS_DATA_DIR="$HOME/google-photos-data"
+uv run --locked google-photos-cli.py doctor
+uv run --locked google-photos-cli.py self-test
+uv run --locked google-photos-cli.py connect
+```
+
+Sign in to the intended account. In Photos web settings, record the previous upload preference and select **Original quality** before any uploads. Keep Chrome and terminal 1 running. The CLI does not change account settings itself.
+
+Terminal 2:
+
+```sh
+cd ~/google-photos-cli
+export GOOGLE_PHOTOS_DATA_DIR="$HOME/google-photos-data"
+uv run --locked google-photos-cli.py plan --year 2023 --limit 5
+uv run --locked google-photos-cli.py run --year 2023 --limit 5 --apply
+# Exit 2 can mean media finished but permanent removal awaits confirmation.
+uv run --locked google-photos-cli.py verify-backups --year 2023 --limit 5
+uv run --locked google-photos-cli.py audit --year 2023 --limit 5 --verify-exports
+```
+
+The sample audit may also exit 2 while `pending_permanent_deletions` is nonempty. Check `media_complete`, the output files, cloud dates/albums and playback; investigate other errors rather than assuming every exit 2 is harmless. Continue without the sample limit only after the sample meets your needs:
+
+```sh
+uv run --locked google-photos-cli.py run --year 2023 --apply
+uv run --locked google-photos-cli.py verify-backups --year 2023
+uv run --locked google-photos-cli.py purge-originals --year 2023
+```
+
+Review the private `permanent-delete-plan.json` in the data directory. It identifies each original and replacement and the local backup files/checksums. After approving that exact scope, permanently finish removal:
+
+```sh
+uv run --locked google-photos-cli.py purge-originals --year 2023 --apply --confirm-permanent-delete
+uv run --locked google-photos-cli.py audit --year 2023 --verify-exports
+uv run --locked google-photos-cli.py report
+```
+
+`report` summarizes all confirmed replacements in this data directory, not a year-filtered subset. The filtered audit defines which selection has passed. It is not a claim about other years. Replace every `--year 2023` consistently if choosing another scope, or remove it everywhere for an authorized whole-library migration.
+
+For a recoverable-Trash workflow, use `--delete-mode trash` on the `run` commands and omit `purge-originals`; still verify backups and exports. After the last upload and checks, restore the previous upload preference if desired, stop `connect` with Ctrl-C, and protect the data directory independently.
+
+## Recovery by symptom
+
+| Symptom | What to do |
+| --- | --- |
+| Missing native executable / `doctor` fails | Install the missing tool or codec; rerun `doctor`. No Google account is needed for diagnosis. Modern libavif with `avifenc -q` and AOM is required. |
+| Missing `.bridge.json`, connection refused, bridge timeout | Start/restart `connect` with the same data directory/account. For an existing Chrome session, restart `broker`, generate a new `bootstrap`, and inject its current contents. Old session keys cannot reconnect to a new broker. |
+| Chrome asks to connect to local device | The owner must allow the loopback connection in Chrome. Do not disable browser security or export cookies. |
+| Chrome is blocked by Screen Time or authentication | Have the owner unlock it normally. A CLI cannot bypass that restriction. |
+| Refresh/navigation during managed `connect` | The worker reattaches when the signed-in Photos page is ready. A manually injected worker must be re-injected after navigation. Timed-out writes still require reconciliation. |
+| HTTP 429 / temporary server errors | Read-only RPCs have bounded retry/backoff. Writes stop on ambiguity. Wait, reconnect if necessary, and resume the same command. Never create an unbounded retry loop. |
+| `committing` with no replacement ID | The commit may already have succeeded. Resume performs hash lookup only. If the hash is not visible, wait and retry later. Do not erase `stage`, change output bytes, or force another commit. A stale ambiguous commit needs investigation, not an automatic new upload. |
+| Processing / export hash / playback pending | Keep the source and journals. Re-run later with the same filters. Waiting does not weaken date, size, hash or playback requirements. |
+| Storage saver replacement | Set Original quality for future uploads. For videos, use `videos --year 2023 --repair --apply`, then audit and follow the removal flow. The current repair command is video-only; image quality mismatches require investigation while retaining the source. Never edit proof fields to force removal. |
+| Local backup hash or size mismatch | Stop. Restore the original backup from an independent copy or investigate the export representation. Do not overwrite the recorded checksum to make it pass. |
+| Wrong account | Disconnect, select the correct profile/data directory, and reconnect. Do not edit the journal account field. |
+| Another workflow holds the data-directory lock | Finish or stop that process first. Use `status`/`report` for local inspection. Never run two modifying workflows against the same account. |
+| Permanent deletion interrupted | Keep its `permanent_delete_started` flag and rerun `purge-originals` with the same filters/confirmation. It checks Trash and source identity before reconciling; do not change policy halfway through. |
+| New arrivals make a full audit fail | Finish outstanding conversions/repairs, run `scan --append`, preview, then process with your intended filters. Do not overwrite the original inventory or abandon its journals. |
+
+Exit codes: 0 means that command passed; 2 means a migration/audit remains incomplete or confirmation is pending. Other failures may exit 1. `doctor` exits 1 when prerequisites are missing. Read the result, not just the code. A preview succeeding does not mean migration is complete.
+
+## Repeat runs and new arrivals
+
+```sh
+uv run --locked google-photos-cli.py scan --append
+uv run --locked google-photos-cli.py plan --year 2023
+uv run --locked google-photos-cli.py run --year 2023 --apply
+```
+
+Append is a read-only cloud inventory operation. It retains historical source IDs and their selection order, excludes journaled replacement IDs and superseded videos, and appends new active IDs. It refuses unfinished commits/conversions/repairs. Metadata for new IDs is fetched on the next `plan`/`run`. A regular `scan` is for initialization; once journals exist it refuses to replace them with a current-library baseline.
+
+Keep journals for future runs. AVIF filenames can be skipped without a download, but a video without its completed journal may be evaluated/encoded again; filenames alone do not prove it is already optimized. When moving the data directory to another disk, journal paths are currently absolute: retain the same mount/path or reconcile paths carefully before continuing. There is no automatic relocation tool.
+
+## Verification and performance
+
+- Every new replacement gets a byte-identical true-original export check before source removal. Normal audits fetch current cloud metadata and check recorded proofs. `audit --verify-exports` additionally downloads current replacements and re-hashes their bytes; it uses more time, network traffic and temporary disk space.
+- `verify-backups` is entirely local and hashes all selected journaled original components. A skipped AVIF with no downloaded original is not counted as a backed-up original. Strict recorded-size mismatches are reported even if a local file's recorded hash matches; investigate before irreversible removal.
+- Local hashes and SHA-1 upload fingerprints are streamed. Video exports are extracted to generated temporary filenames, never trusted ZIP paths. Small image batch exports still use bounded batches in memory.
+- The worker runs at most six tasks concurrently. Native AOM/x265 encoders do the expensive computation; Python coordinates them. Increase image workers only if CPU, RAM and disk have headroom. Running more processes bypasses useful bounds and increases throttling risk.
+- Catalog checkpointing may replay up to 999 metadata reads after a hard crash, but never marks missing metadata complete. This reduces large-library JSON rewrite work without changing mutation gates.
+- Deadlines prevent queued tasks from starting after expiry. They cannot undo a Google request already in flight. Automatic retries apply only to explicitly read-only RPCs; commit intent and Trash readback remain authoritative for recovery.
+
+## Reporting a problem
+
+Provide the public commit, platform, tool versions, command with account-specific filters redacted, error type, and affected journal **stage**. Do not attach your data directory, originals, Chrome profile, bootstrap, `.bridge.json`, account email, Google media IDs, signed URLs, or unredacted logs. Native codec tests use synthetic assets and can often reproduce a codec problem without exposing photos.

@@ -35,10 +35,14 @@ class Broker(unittest.TestCase):
 
         try:
             task = request("/enqueue", {"op": "hello"})
+            self.assertEqual(request("/next")["id"], task["id"])
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 pending = pool.submit(request, "/result/" + task["id"])
                 request("/result", {"id": task["id"], "ok": True, "value": "synthetic"})
                 self.assertEqual(pending.result(timeout=5)["value"], "synthetic")
+            request("/enqueue", {"op": "rpc", "expires_at": 0})
+            fresh = request("/enqueue", {"op": "hello"})
+            self.assertEqual(request("/next")["id"], fresh["id"])
             for kwargs in ({"origin": "https://example.invalid"}, {"key": "wrong"}):
                 with self.assertRaises(urllib.error.HTTPError) as caught:
                     request("/next", **kwargs)

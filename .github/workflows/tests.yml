@@ -1,4 +1,4 @@
-name: Offline tests
+name: Offline and codec tests
 on: [push, pull_request]
 permissions:
   contents: read
@@ -7,7 +7,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.15'
+      - run: uv run --locked google-photos-cli.py self-test
+  codecs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.15'
+      - run: sudo apt-get update && sudo apt-get install -y libavif-bin libimage-exiftool-perl ffmpeg
       - run: uv run --locked google-photos-cli.py self-test

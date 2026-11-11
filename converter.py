@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import subprocess
 import tempfile
+import os
 
 ROOT = Path(__file__).resolve().parent
 TAGS = [
@@ -47,8 +48,45 @@ def metadata(path):
 
 def atomic_json(path, value):
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+    with tmp.open("w", encoding="utf-8") as file:
+        file.write(json.dumps(value, ensure_ascii=False) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
     tmp.replace(path)
+    sync_directory(path.parent)
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def backup_file(source, target):
+    """Durable, atomic backup: a partial file is never accepted on resume."""
+    import shutil
+
+    target = Path(target)
+    tmp = target.with_suffix(target.suffix + ".part")
+    with Path(source).open("rb") as src, tmp.open("wb") as dst:
+        shutil.copyfileobj(src, dst, 1024 * 1024)
+        dst.flush()
+        os.fsync(dst.fileno())
+    tmp.replace(target)
+    sync_directory(target.parent)
+
+
+def atomic_bytes(target, data):
+    target = Path(target)
+    tmp = target.with_suffix(target.suffix + ".part")
+    with tmp.open("wb") as file:
+        file.write(data)
+        file.flush()
+        os.fsync(file.fileno())
+    tmp.replace(target)
+    sync_directory(target.parent)
 
 
 def convert(
@@ -62,6 +100,9 @@ def convert(
     live_still=False,
 ):
     from PIL import Image, ImageOps
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
 
     source, output = Path(source).resolve(), Path(output).resolve()
     if source == output or output.exists():
