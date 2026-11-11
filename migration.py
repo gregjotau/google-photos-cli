@@ -223,6 +223,11 @@ class Migration:
                         source_representation="Google original export differs in size from recorded upload",
                         original_export_verified=True,
                     )
+                self.write(
+                    state,
+                    original_export_verified=True,
+                    original_export_method="pLFTfd",
+                )
             self.write(
                 state,
                 stage="downloaded",
@@ -297,6 +302,7 @@ class Migration:
             original_sha256=image["sha256"],
             original_backup_bytes=image["bytes"],
             original_export_verified=True,
+            original_export_method="pLFTfd",
             stage="downloaded",
         )
 

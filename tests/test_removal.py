@@ -185,6 +185,39 @@ class PermanentRemoval(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "identity differs"):
                 create_plan(root, Selection())
 
+    def test_export_representation_size_difference_is_not_a_checksum_failure(self):
+        from removal import verify_backups
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state, _, path = data(root)
+            state["original_bytes"] = 5
+            state["original_ext"][0][5] = 5
+            path.write_text(json.dumps(state))
+            result = verify_backups(root, Selection())
+            self.assertTrue(result["complete"])
+            self.assertEqual(len(result["cloud_size_mismatches"]), 1)
+            with self.assertRaisesRegex(RuntimeError, "Complete original backup size"):
+                create_plan(root, Selection())
+
+    def test_size_difference_requires_identity_bound_canonical_export_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state, _, path = data(root)
+            state.update(
+                original_bytes=5,
+                original_export_verified=True,
+                original_export_method="pLFTfd",
+                original_info=[["old"]],
+            )
+            state["original_ext"][0][5] = 5
+            path.write_text(json.dumps(state))
+            self.assertEqual(len(create_plan(root, Selection())["items"]), 1)
+            state["original_info"] = [["other"]]
+            path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(RuntimeError, "Complete original backup size"):
+                create_plan(root, Selection())
+
     def test_low_level_api_requires_confirmation_and_never_empties_trash(self):
         api = API.__new__(API)
         api.rpc = Mock()

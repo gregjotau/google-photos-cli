@@ -38,7 +38,18 @@ def records(root, selection):
             yield path, state, inv["account"]
 
 
-def local_backup(state):
+def canonical_export_proof(state):
+    return (
+        bool(state.get("original_key"))
+        and state.get("original_export_verified") is True
+        and state.get("original_export_method") == "pLFTfd"
+        and at(state.get("original_info"), 0, 0) == state.get("original_key")
+        and at(state.get("original_ext"), 0, 0) == state.get("original_key")
+        and at(state.get("original_ext"), 0, 5) == state.get("original_bytes")
+    )
+
+
+def local_backup(state, *, require_cloud_size=True):
     parts = state.get("live_backup_manifest") or [
         {
             "path": state.get("source"),
@@ -46,13 +57,24 @@ def local_backup(state):
             "bytes": state.get("original_backup_bytes", state.get("original_bytes")),
         }
     ]
-    if not parts or sum(p.get("bytes") or 0 for p in parts) != state.get(
-        "original_bytes"
+    mismatch = sum(p.get("bytes") or 0 for p in parts) != state.get("original_bytes")
+    if (
+        not parts
+        or mismatch
+        and (
+            state.get("live_backup_manifest")
+            or require_cloud_size
+            and not canonical_export_proof(state)
+        )
     ):
         raise RuntimeError(
             "Complete original backup size must match before permanent deletion"
         )
     for part in parts:
+        if not part.get("sha256"):
+            raise RuntimeError(
+                "No recorded original checksum; this legacy backup cannot be verified retrospectively"
+            )
         path = Path(part["path"]) if part.get("path") else None
         if (
             not path
@@ -81,15 +103,27 @@ def verify_backups(root, selection):
     checked = 0
     total = 0
     failures = []
+    representations = []
     for _, s, account in records(root, selection):
         if not s.get("source"):
             continue
         try:
             if s.get("account") != account:
                 raise RuntimeError("Backup journal account mismatch")
-            parts = local_backup(s)
+            parts = local_backup(s, require_cloud_size=False)
             total += sum(p["bytes"] for p in parts)
             checked += 1
+            if sum(p["bytes"] for p in parts) != s.get("original_bytes"):
+                representations.append(
+                    {
+                        "key": s["original_key"],
+                        "reported_cloud_bytes": s.get("original_bytes"),
+                        "recorded_download_bytes": sum(p["bytes"] for p in parts),
+                        "canonical_export_provenance_recorded": canonical_export_proof(
+                            s
+                        ),
+                    }
+                )
         except (OSError, RuntimeError) as error:
             failures.append({"key": s["original_key"], "error": str(error)})
     return {
@@ -98,6 +132,7 @@ def verify_backups(root, selection):
         "backup_bytes": total,
         "failures": failures,
         "cloud_requests": 0,
+        "cloud_size_mismatches": representations,
     }
 
 

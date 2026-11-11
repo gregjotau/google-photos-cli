@@ -78,10 +78,13 @@ class Videos:
                 "Ambiguous video commit requires its retained backup and output; restore missing files before resuming"
             )
         if not s.get("original_ext"):
+            info = self.api.info(key)
+            if at(info, 0, 0) != key:
+                raise RuntimeError("Video original info identity mismatch")
             self.write(
                 s,
                 original_ext=e,
-                original_info=self.api.info(key),
+                original_info=info,
                 inventory_row=row,
                 source=str(source),
                 output=str(target),
@@ -99,6 +102,8 @@ class Videos:
                 stage="downloaded",
                 original_sha256=sha(source),
                 original_backup_bytes=source.stat().st_size,
+                original_export_verified=True,
+                original_export_method="pLFTfd",
             )
         if not s.get("original_sha256"):
             # An atomic file can survive a crash just before its journal update.
