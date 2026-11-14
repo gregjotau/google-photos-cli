@@ -19,11 +19,6 @@ def audit(root=ROOT, verbose=True, selection=None, verify_exports=False):
     spec.loader.exec_module(cli)
     api = API()
     inv = cli.scan(root, api, "audit-inventory.json")
-    # Refresh metadata, rather than relying on a previous audit's cache.
-    old = root / "audit-catalog.json"
-    if old.exists():
-        old.unlink()
-    cat = cli.catalog(root, api, inv, "audit-catalog.json")
 
     def load_journals(folder):
         records = []
@@ -39,20 +34,49 @@ def audit(root=ROOT, verbose=True, selection=None, verify_exports=False):
 
     states = load_journals("work-api")
     vst = load_journals("work-video")
+    original_inv = json.loads((root / "inventory-api.json").read_text())
+    if original_inv["account"] != inv["account"]:
+        raise RuntimeError("Audit account differs from original snapshot")
     scoped = bool(selection and selection.filtered)
     scope = None
+    catalog_inventory = inv
     if scoped:
-        original_inv = json.loads((root / "inventory-api.json").read_text())
         original_cat = json.loads((root / "catalog-api.json").read_text())
+        if original_cat["account"] != inv["account"]:
+            raise RuntimeError("Audit original catalog account mismatch")
         scope = {r[0] for r in selection.select(original_inv, original_cat)}
+        # The complete scan still proves source/replacement presence or absence.
+        # Metadata for known unrelated originals/replacements is unnecessary, but
+        # every unknown arrival needs fresh metadata to classify capture year and
+        # offset safely before a later append. Never classify arrivals by filename.
+        known = {r[0] for r in original_inv["items"]}
+        for s in states + vst:
+            if s.get("replacement_key"):
+                known.add(s["replacement_key"])
+            history = s.get("superseded_replacements", [])
+            if not isinstance(history, list) or any(
+                not isinstance(i, dict) or not isinstance(i.get("key"), str)
+                or not i["key"] for i in history
+            ):
+                raise RuntimeError("Audit superseded replacement history is malformed")
+            known.update(i["key"] for i in history)
         states = [s for s in states if s["original_key"] in scope]
         vst = [s for s in vst if s["original_key"] in scope]
         target = set(scope)
         for s in states + vst:
             if s.get("replacement_key"):
                 target.add(s["replacement_key"])
+        metadata_keys = target | {r[0] for r in inv["items"] if r[0] not in known}
+        catalog_inventory = {
+            **inv, "items": [r for r in inv["items"] if r[0] in metadata_keys]
+        }
     else:
         target = {r[0] for r in inv["items"]}
+    # All metadata used by this audit is fresh, never a previous audit's cache.
+    old = root / "audit-catalog.json"
+    if old.exists():
+        old.unlink()
+    cat = cli.catalog(root, api, catalog_inventory, "audit-catalog.json")
     avif = []
     live = []
     videos = []
@@ -81,9 +105,6 @@ def audit(root=ROOT, verbose=True, selection=None, verify_exports=False):
     active_rows = {r[0]: r for r in inv["items"]}
     problems = []
     proof_keys = set()
-    original_inv = json.loads((root / "inventory-api.json").read_text())
-    if original_inv["account"] != inv["account"]:
-        raise RuntimeError("Audit account differs from original snapshot")
     journal = {s["original_key"]: s for s in states + vst}
     for row in original_inv["items"]:
         key = row[0]

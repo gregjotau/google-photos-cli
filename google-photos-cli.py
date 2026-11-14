@@ -134,6 +134,10 @@ def parser():
         help="Run resumable image and video migration; Live Photos become AVIF stills by default",
     )
     encoding_options(combined)
+    combined.add_argument(
+        "--continue-on-item-error", action="store_true",
+        help="Defer known item-level failures, preserve journals, and finish other items; exits 2 if any are deferred",
+    )
     plan = sub.add_parser(
         "plan", help="Preview matching assets and sizes without uploading or trashing"
     )
@@ -733,8 +737,10 @@ def main():
             batch_size=args.batch_size,
             after_batch=cleanup,
             stop_event=stop,
+            continue_on_item_error=args.continue_on_item_error,
         )
-        videos = Videos(selection=selection, after_batch=cleanup, stop_event=stop)
+        videos = Videos(selection=selection, after_batch=cleanup, stop_event=stop,
+                        continue_on_item_error=args.continue_on_item_error)
         rows = selection.select(images.inventory, images.catalog)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -749,6 +755,11 @@ def main():
                 if any(errors or waiting for errors, waiting in outcomes):
                     stop.set()
                     raise SystemExit(2)
+        deferred = images.deferred + videos.deferred if args.continue_on_item_error else []
+        if deferred:
+            print(json.dumps({"deferred_items": len(deferred), "source_keys": deferred,
+                              "complete": False, "ledger": str(root / "deferred-items.json")}))
+            raise SystemExit(2)
         complete_workflow(root, selection, args)
     elif args.command == "scan":
         if args.append:

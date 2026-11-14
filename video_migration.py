@@ -20,7 +20,9 @@ def sha(path):
 
 
 class Videos:
-    def __init__(self, selection=None, after_batch=None, stop_event=None):
+    def __init__(self, selection=None, after_batch=None, stop_event=None, continue_on_item_error=False):
+        self.continue_on_item_error = continue_on_item_error
+        self.deferred = []
         self.selection = selection or Selection()
         self.errors = []
         self.after_batch = after_batch
@@ -81,6 +83,8 @@ class Videos:
             )
         if not s.get("original_ext"):
             info = self.api.info(key)
+            if not at(info, 0):
+                raise RuntimeError("Original source is unavailable")
             if at(info, 0, 0) != key:
                 raise RuntimeError("Video original info identity mismatch")
             self.write(
@@ -129,6 +133,7 @@ class Videos:
                 s,
                 stage="already_efficient",
                 reason="Optimized video would not save storage",
+                error=None,
             )
             self.log("already_efficient", key=key)
             return
@@ -157,6 +162,7 @@ class Videos:
             encoded_bytes=target.stat().st_size,
             encoded_sha256=encoded_sha,
             uploaded_at=time.time(),
+            error=None,
         )
         with self.lock:
             self.waiting.append(s)
@@ -182,7 +188,7 @@ class Videos:
         ):
             if sha(s["source"]) != s["original_sha256"]:
                 raise RuntimeError("Video original backup changed")
-            self.write(s, stage="trashed", trashed_at=time.time())
+            self.write(s, stage="trashed", trashed_at=time.time(), error=None)
             self.log("removal_reconciled", key=s["original_key"])
             return True
         key = s["replacement_key"]
@@ -265,7 +271,7 @@ class Videos:
                 [s["original_key"]], exhaustive=True
             ):
                 raise RuntimeError("Video Trash readback failed")
-        self.write(s, stage="trashed", trashed_at=time.time())
+        self.write(s, stage="trashed", trashed_at=time.time(), error=None)
         self.log(
             "replaced",
             key=s["original_key"],
@@ -283,9 +289,10 @@ class Videos:
                     with self.lock:
                         self.waiting.append(s)
             except Exception as e:
-                self.errors.append(s["original_key"])
-                self.write(s, error=str(e))
-                self.log("finalize_error", key=s["original_key"], error=str(e))
+                from workflow import record_item_failure
+
+                record_item_failure(self, ROOT, s, e, "finalize_error",
+                                    key=s["original_key"], folder="work-video")
 
     def run(self, limit=None, rows=None):
         rows = [
@@ -308,10 +315,11 @@ class Videos:
                     if path.exists()
                     else {"original_key": row[0], "account": self.account}
                 )
-                self.errors.append(row[0])
-                self.write(s, error=str(e))
-                self.log("item_error", key=row[0], error=str(e))
-                self.stop_event.set()
+                from workflow import record_item_failure
+
+                if not record_item_failure(self, ROOT, s, e, "item_error",
+                                           key=row[0], folder="work-video"):
+                    self.stop_event.set()
 
         from workflow import run_batches
 
