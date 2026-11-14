@@ -20,7 +20,9 @@ def sha(path):
 
 
 class Videos:
-    def __init__(self, selection=None, after_batch=None, stop_event=None):
+    def __init__(self, selection=None, after_batch=None, stop_event=None, continue_on_item_error=False):
+        self.continue_on_item_error = continue_on_item_error
+        self.deferred = []
         self.selection = selection or Selection()
         self.errors = []
         self.after_batch = after_batch
@@ -81,6 +83,8 @@ class Videos:
             )
         if not s.get("original_ext"):
             info = self.api.info(key)
+            if not at(info, 0):
+                raise RuntimeError("Original source is unavailable")
             if at(info, 0, 0) != key:
                 raise RuntimeError("Video original info identity mismatch")
             self.write(
@@ -285,9 +289,10 @@ class Videos:
                     with self.lock:
                         self.waiting.append(s)
             except Exception as e:
-                self.errors.append(s["original_key"])
-                self.write(s, error=str(e))
-                self.log("finalize_error", key=s["original_key"], error=str(e))
+                from workflow import record_item_failure
+
+                record_item_failure(self, ROOT, s, e, "finalize_error",
+                                    key=s["original_key"], folder="work-video")
 
     def run(self, limit=None, rows=None):
         rows = [
@@ -310,10 +315,11 @@ class Videos:
                     if path.exists()
                     else {"original_key": row[0], "account": self.account}
                 )
-                self.errors.append(row[0])
-                self.write(s, error=str(e))
-                self.log("item_error", key=row[0], error=str(e))
-                self.stop_event.set()
+                from workflow import record_item_failure
+
+                if not record_item_failure(self, ROOT, s, e, "item_error",
+                                           key=row[0], folder="work-video"):
+                    self.stop_event.set()
 
         from workflow import run_batches
 

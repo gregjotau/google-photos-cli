@@ -63,6 +63,8 @@ uv run --locked google-photos-cli.py run --year current --apply --confirm-perman
 uv run --locked google-photos-cli.py run --apply --confirm-permanent-delete
 ```
 
+For long combined runs, `run --year 2023 --apply --continue-on-item-error` can log and defer known item failures while continuing unaffected items. It retains journals and backups, reports the deferred sources, and exits 2 rather than claiming completion. Account, backup, identity and deletion failures still stop writes. See [continuation and exception handling](docs/OPERATIONS.md#continuing-past-known-item-failures).
+
 `run`, `migrate`, and `videos` **preview by default**. Cloud uploads and moving originals to Trash require `--apply`. `--dry-run` always overrides `--apply`. A first preview can fetch the inventory and metadata, but never uploads or trashes media. With a complete cached snapshot, previews work offline.
 
 Existing AVIF images are skipped before media download during conversion. Completed journals are also skipped on reruns. Audits can download untracked AVIF files to verify them. **Live/Motion Photos become one AVIF still by default**; cloud motion is intentionally removed, while the complete original still and motion components remain in checksum-verified local backups. Use `--live-photos keep` to preserve them unchanged in Google Photos. No separate cloud video is created. Locked Folder, unsaved shared items, and items already in Trash are outside the migration scope.

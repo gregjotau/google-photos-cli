@@ -103,6 +103,16 @@ Append is a read-only cloud inventory operation. It retains historical source ID
 
 Keep journals for future runs. AVIF filenames can be skipped without a download, but a video without its completed journal may be evaluated/encoded again; filenames alone do not prove it is already optimized. When moving the data directory to another disk, journal paths are currently absolute: retain the same mount/path or reconcile paths carefully before continuing. There is no automatic relocation tool.
 
+## Continuing past known item failures
+
+For a large scoped combined run, opt in with `run --year YEAR --apply --continue-on-item-error` (add the existing permanent-deletion confirmation only after reviewing that policy). The default remains stop-on-error.
+
+This mode records `item_deferred` events and an atomic, account-bound `deferred-items.json` ledger. It can defer an unavailable source before downloading it; a capture-date failure before source removal, with a complete verified backup and unchanged encoded output; an explicitly uncertain upload commit, preserving its committing journal and output for hash reconciliation; or a recognized network/server error before commit. It continues unaffected items and their normal incremental cleanup. No source is marked converted or deleted by deferral. Missing-source entries explicitly report that no backup was possible.
+
+Account or identity mismatches, corrupt/incomplete backups, changed outputs, unexpected errors, pending verification timeouts and any Trash/permanent-deletion failure still stop admission of new work. Mutating requests are never blindly retried. Failed uploaded candidates can remain in the account for inspection and consume temporary space; this mode does not delete them automatically. Journals keep their original stages and errors. The ledger is historical diagnostics, not permission to skip verification or reset an ambiguous commit.
+
+After unaffected work finishes, the command prints a deferred-item summary and exits 2. It does not run the completion path or claim a complete migration. A fresh audit still reports unresolved originals/replacements. A subsequent run uses the canonical journal recovery rules; it does not silently exclude ledger entries. Review exceptions and retain the original inventory and journals.
+
 ## Verification and performance
 
 Scoped audits still scan every active-library page, but refresh metadata only for selected sources/replacements and unknown arrivals. Known unrelated originals and replacements need no metadata refresh. Unfiltered audits refresh every active item. Missing selected replacements and retained sources still fail the audit. A successful video resume clears its previous error only after reaching a verified success stage.

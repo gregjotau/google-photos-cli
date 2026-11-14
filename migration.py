@@ -41,7 +41,10 @@ class Migration:
         batch_size=10,
         after_batch=None,
         stop_event=None,
+        continue_on_item_error=False,
     ):
+        self.continue_on_item_error = continue_on_item_error
+        self.deferred = []
         self.api = API()
         self.quality = quality
         self.speed = speed
@@ -162,6 +165,8 @@ class Migration:
             raise RuntimeError("Original backup changed; refusing to resume upload")
         if not state.get("original_info"):
             info = self.api.info(key)
+            if not at(info, 0):
+                raise RuntimeError("Original source is unavailable")
             if at(info, 0, 0) != key:
                 raise RuntimeError("Original info identity mismatch")
             self.write(
@@ -574,9 +579,10 @@ class Migration:
                     state,
                 )
             except Exception as e:
-                self.write(state, error=str(e))
-                self.errors.append(state["original_key"])
-                self.log("finalize_error", key=state["original_key"], error=str(e))
+                from workflow import record_item_failure
+
+                record_item_failure(self, ROOT, state, e, "finalize_error",
+                                    key=state["original_key"], folder="work-api")
             return ("error", state)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as finalize_pool:
@@ -613,10 +619,11 @@ class Migration:
                     self.commit(*prepared)
             except Exception as e:
                 state = self.state(row[0])
-                self.write(state, error=str(e))
-                self.errors.append(row[0])
-                self.log("item_error", key=row[0], error=str(e))
-                self.stop_event.set()
+                from workflow import record_item_failure
+
+                if not record_item_failure(self, ROOT, state, e, "item_error",
+                                           key=row[0], folder="work-api"):
+                    self.stop_event.set()
 
         rows = [
             r
