@@ -19,6 +19,45 @@ import test_removal
 
 
 class Recovery(unittest.TestCase):
+    def test_successful_video_resume_clears_old_error_without_reencoding(self):
+        import threading
+        from test_selection import fixture
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            folder = root / "old"
+            folder.mkdir()
+            source = folder / "original.mov"
+            output = folder / "clip-hevc.mp4"
+            source.write_bytes(b"original-video" * 10)
+            output.write_bytes(b"encoded-video")
+            row, ext = fixture(filename="clip.mov", video=True)
+            ext[0][5] = source.stat().st_size
+            state = dict(account="example", original_key="old", stage="converted",
+                         error="previous bridge timeout", deletion_mode="permanent",
+                         original_ext=ext, original_info=[["old"]],
+                         original_sha256=digest(source), conversion=dict(sha256=digest(output)))
+            (folder / "state.json").write_text(json.dumps(state))
+            worker = Videos.__new__(Videos)
+            worker.account = "example"
+            worker.cat = dict(items={"old": ext})
+            worker.api = object()
+            worker.waiting = []
+            worker.lock = threading.Lock()
+            worker.log = Mock()
+            worker.write = lambda s, **kw: s.update(kw)
+            with (
+                patch("video_migration.WORK", root),
+                patch("video_migration.upload", return_value="AF1replacement"),
+                patch("video_migration.encode", side_effect=AssertionError("Do not reencode")),
+                patch("video_migration.original_files", side_effect=AssertionError("Do not redownload")),
+            ):
+                worker.process(row)
+            self.assertEqual(len(worker.waiting), 1)
+            self.assertEqual(worker.waiting[0]["stage"], "uploaded")
+            self.assertIsNone(worker.waiting[0]["error"])
+
+
     def test_recovered_encoded_video_cannot_be_shorter_than_original(self):
         from video_codec import validate_encoded
 

@@ -129,6 +129,7 @@ class Videos:
                 s,
                 stage="already_efficient",
                 reason="Optimized video would not save storage",
+                error=None,
             )
             self.log("already_efficient", key=key)
             return
@@ -157,6 +158,7 @@ class Videos:
             encoded_bytes=target.stat().st_size,
             encoded_sha256=encoded_sha,
             uploaded_at=time.time(),
+            error=None,
         )
         with self.lock:
             self.waiting.append(s)
@@ -182,7 +184,7 @@ class Videos:
         ):
             if sha(s["source"]) != s["original_sha256"]:
                 raise RuntimeError("Video original backup changed")
-            self.write(s, stage="trashed", trashed_at=time.time())
+            self.write(s, stage="trashed", trashed_at=time.time(), error=None)
             self.log("removal_reconciled", key=s["original_key"])
             return True
         key = s["replacement_key"]
@@ -265,7 +267,7 @@ class Videos:
                 [s["original_key"]], exhaustive=True
             ):
                 raise RuntimeError("Video Trash readback failed")
-        self.write(s, stage="trashed", trashed_at=time.time())
+        self.write(s, stage="trashed", trashed_at=time.time(), error=None)
         self.log(
             "replaced",
             key=s["original_key"],
